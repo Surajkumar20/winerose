@@ -496,3 +496,24 @@ Where the code differs from, or adds detail to, the sections above:
 - **CI** runs with `-SkipBenchmark` / `-LE benchmark`: CPU thresholds only make sense on known hardware.
 - **Not yet:** filter-type mapping from Serum (feature/presets); BUS 1/2 sends (with the Phase 5 buses); Serum 2's
   "osc/filter as modulation source".
+
+### Performance: SIMD unison reads (between Phases 4 and 5)
+
+- `WavetableBank::read4()` reads four unison voices at once. Table loads are scalar (SSE2 has no gather)
+  and go straight into `_mm_set_ps`, so values never round-trip through memory. The frame morph, level
+  crossfade and Hermite run four lanes wide, in the same operation order as `read()`; a test checks they
+  match bit for bit.
+- The voice uses it in two specialized loops (plain and warped; warps stay per lane). Trailing groups of 2–3
+  voices are padded. Spread unison (span > 0) stays scalar.
+- Results (Release):
+
+  | Scenario | Before | After |
+  |---|---|---|
+  | Acceptance (16 voices × 3 osc × 7 unison) | 24.3% | ≈ 22% |
+  | 16 unison voices | 57% | ≈ 44% |
+  | Sync warp, Good | 41% | ≈ 30% |
+  | Sync warp, Ultra | 137% | ≈ 114% |
+
+  Run-to-run noise is about ±1%.
+- **Next levers if needed:** AVX2 gathers (needs a runtime CPU dispatch), and a struct-of-arrays unison
+  layout.

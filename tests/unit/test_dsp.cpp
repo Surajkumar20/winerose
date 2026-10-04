@@ -225,3 +225,22 @@ TEST_CASE("zero-length stages jump straight through", "[dsp][envelope]")
     env.noteOff();
     CHECK_FALSE(env.isActive());
 }
+
+TEST_CASE("read4 matches four scalar reads bit for bit", "[dsp][wavetable][simd]")
+{
+    const auto bank = makeBasicShapesTable();
+    std::uint32_t seed = 99;
+    auto rnd = [&seed] { seed = seed * 1664525u + 1013904223u; return static_cast<double>(seed >> 8) / 16777216.0; };
+    for (int trial = 0; trial < 20000; ++trial) {
+        const auto fp = bank->resolveFrame(static_cast<float>(rnd() * 3.0));
+        double ph[4];
+        WavetableBank::LevelChoice lc[4];
+        for (int k = 0; k < 4; ++k) {
+            ph[k] = trial % 97 == 0 ? 1.0 : rnd();   // include the phase == 1.0 edge
+            lc[k] = WavetableBank::selectLevel(std::pow(10.0, -5.0 + 4.6 * rnd()));
+        }
+        float x4[4];
+        bank->read4(ph, fp, lc, x4);
+        for (int k = 0; k < 4; ++k) REQUIRE(x4[k] == bank->read(ph[k], fp, lc[k]));
+    }
+}

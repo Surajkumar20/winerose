@@ -560,7 +560,74 @@ void Voice::render(float* mainL, float* mainR, float* directL, float* directR, i
                 const double ratio = pitchRatio[o];
 
                 float oscL = 0.0f, oscR = 0.0f, mono = 0.0f;
-                for (int u = 0; u < osc.count; ++u) {
+                int u = 0;
+                if (osc.span <= 0.0f && !warped) {
+                    // Plain path: four unison voices per read4 (SSE2 maths; see WavetableBank::read4).
+                    for (; u + 4 <= osc.count; u += 4) {
+                        auto* v = &osc.voices[static_cast<std::size_t>(u)];
+                        const double ph[4] = {v[0].phase, v[1].phase, v[2].phase, v[3].phase};
+                        const dsp::WavetableBank::LevelChoice lc[4] = {v[0].levels, v[1].levels, v[2].levels, v[3].levels};
+                        float x4[4];
+                        table->read4(ph, frames[o], lc, x4);
+                        for (int k = 0; k < 4; ++k) {
+                            v[k].phase += v[k].inc * ratio;
+                            if (v[k].phase >= 1.0) v[k].phase -= std::floor(v[k].phase);
+                            oscL += x4[k] * v[k].gainL;
+                            oscR += x4[k] * v[k].gainR;
+                            mono += x4[k];
+                        }
+                    }
+                    if (osc.count - u >= 2) {
+                        // Trailing 2-3 voices: one padded read4 (extra lanes repeat the last voice, ignored).
+                        const int lanes = osc.count - u;
+                        auto* v = &osc.voices[static_cast<std::size_t>(u)];
+                        double ph[4];
+                        dsp::WavetableBank::LevelChoice lc[4];
+                        for (int k = 0; k < 4; ++k) {
+                            const auto& src = v[std::min(k, lanes - 1)];
+                            ph[k] = src.phase;
+                            lc[k] = src.levels;
+                        }
+                        float x4[4];
+                        table->read4(ph, frames[o], lc, x4);
+                        for (int k = 0; k < lanes; ++k) {
+                            v[k].phase += v[k].inc * ratio;
+                            if (v[k].phase >= 1.0) v[k].phase -= std::floor(v[k].phase);
+                            oscL += x4[k] * v[k].gainL;
+                            oscR += x4[k] * v[k].gainR;
+                            mono += x4[k];
+                        }
+                        u = osc.count;
+                    }
+                } else if (osc.span <= 0.0f) {
+                    // Warped path: warps per lane (they move the read phase / scale the output), reads four at a time.
+                    while (osc.count - u >= 2) {
+                        const int lanes = std::min(4, osc.count - u);
+                        auto* v = &osc.voices[static_cast<std::size_t>(u)];
+                        double ph[4];
+                        float amp[4];
+                        dsp::WavetableBank::LevelChoice lc[4];
+                        for (int k = 0; k < 4; ++k) {
+                            const auto& src = v[std::min(k, lanes - 1)];
+                            const dsp::WarpOut w = dsp::applyDualWarp(osc.warp1, src.warp1, mod1, osc.warp2, src.warp2, mod2, src.phase, remap);
+                            ph[k] = w.phase;
+                            amp[k] = w.amp;
+                            lc[k] = src.levels;
+                        }
+                        float x4[4];
+                        table->read4(ph, frames[o], lc, x4);
+                        for (int k = 0; k < lanes; ++k) {
+                            const float x = x4[k] * amp[k];
+                            v[k].phase += v[k].inc * ratio;
+                            if (v[k].phase >= 1.0) v[k].phase -= std::floor(v[k].phase);
+                            oscL += x * v[k].gainL;
+                            oscR += x * v[k].gainR;
+                            mono += x;
+                        }
+                        u += lanes;
+                    }
+                }
+                for (; u < osc.count; ++u) {
                     auto& uv = osc.voices[static_cast<std::size_t>(u)];
                     dsp::WavetableBank::FramePos fp = frames[o];
                     if (osc.span > 0.0f) {

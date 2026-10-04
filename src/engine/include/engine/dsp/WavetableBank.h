@@ -140,6 +140,13 @@ public:
         return read(phase, resolveFrame(framePos), lc);
     }
 
+    /**
+     * @brief Four reads at once — unison voices sharing a table and frame position, each with its own phase
+     *        and level choice. out[i] equals read(phase[i], fp, lc[i]) bit for bit (same operation order),
+     *        SSE2-vectorized on x86 with a scalar fallback elsewhere.
+     */
+    void read4(const double* phase, const FramePos& fp, const LevelChoice* lc, float* out) const noexcept;
+
 private:
     WavetableBank() = default;
 
