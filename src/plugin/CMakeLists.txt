@@ -56,3 +56,17 @@ if(WINEROSE_BUILD_CLAP)
         CLAP_ID       "com.winerose.winerose"
         CLAP_FEATURES instrument synthesizer stereo)
 endif()
+
+# pluginval as a ctest (scripts/build.ps1 downloads pluginval and sets this). Strictness 10 is the
+# release bar from SPEC §5.4.
+set(WINEROSE_PLUGINVAL "" CACHE FILEPATH "pluginval executable; when set, ctest validates the VST3 with it")
+set(WINEROSE_PLUGINVAL_STRICTNESS 10 CACHE STRING "pluginval --strictness-level")
+if(WINEROSE_BUILD_TESTS AND WINEROSE_PLUGINVAL)
+    add_test(NAME plugin.pluginval
+        COMMAND "${WINEROSE_PLUGINVAL}"
+                --strictness-level ${WINEROSE_PLUGINVAL_STRICTNESS}
+                --validate-in-process
+                --output-dir "${CMAKE_BINARY_DIR}/pluginval"
+                --validate "$<TARGET_FILE_DIR:Winerose_VST3>/../../../Winerose.vst3")
+    set_tests_properties(plugin.pluginval PROPERTIES TIMEOUT 1200 LABELS "slow")
+endif()

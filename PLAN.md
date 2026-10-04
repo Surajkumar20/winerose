@@ -326,3 +326,34 @@ Where the code differs from, or adds detail to, the sections above:
   pluginval scripting and CI.
 - **Verified:** core-only and full builds with 0 warnings in Winerose code; all unit tests pass;
   `pluginval 1.0.4 --strictness-level 10` passes on the Release VST3. **Not yet verified:** loading in FL Studio.
+
+## 7. As built on `feature/build`
+
+- **`scripts/build.ps1`** (PowerShell 5.1+) runs configure → build → ctest, with pluginval as a ctest at
+  strictness 10. It finds a CMake new enough for the preset (VS-bundled for `vs2026`) and downloads pluginval
+  once into `build/tools/`.
+- **`CMakePresets.json`**: `vs2026`, `vs2026-core`, `vs2022`, `ninja`, `ninja-core`, each building into
+  `build/<preset>/`.
+- **Tests (ctest):** `unit.*` (Catch2), `golden.*`, `arch.*` (the layering checker must reject direct,
+  transitive and `#include` violations, and must accept clean graphs and `$<LINK_ONLY:>` deps), `tools.*`
+  (smoke tests) and `plugin.pluginval`.
+- **Golden renders:** `tools/render` (`winerose_render`, JUCE-free) drives the Engine exactly as a host does.
+  `tests/golden` compares 44.1/48/96 kHz renders against `tests/golden/data/*.wav` at -100 dB RMS, and checks
+  that output is identical for host block sizes 1…512. **Engine branches must keep block-size invariance**:
+  run modulation on a fixed internal sub-block (SPEC §1.9), never per host block. Update goldens with
+  `WINEROSE_UPDATE_GOLDEN=1`.
+- **Vendored libs:** `libs/hiir` (WTFPL) and `libs/pffft` (FFTPACK BSD-like) as static targets, with smoke
+  tests.
+- **Tools:**
+  - `param_schema` writes INI schemas, JSON schema and default state; output is deterministic (tested).
+  - `preset_dump` shows the container, the `.SerumPreset` header/metadata and the `.fxp`/`.fxb` header.
+    `feature/presets` extends it with CBOR decoding.
+  - `measure_host` provides `list` / `sweep` / `state`. `state` unwraps JUCE's `VST3PluginState` XML to the
+    plugin's raw component chunk. It is tested end to end against Winerose's own VST3: a value set through
+    the VST3 interface appears in the saved state. Probe renders (SPEC §5.7 step 4) come once the engine
+    makes sound.
+- **CI** (`.github/workflows/ci.yml`): Windows `vs2022` full build + pluginval with artefact upload, plus
+  core-only Linux (gcc) and macOS (clang) jobs. **Not yet run:** the repo isn't pushed.
+- **Portability check done locally:** every JUCE-free source compiles under GCC 13 with
+  `-Wall -Wextra -Wpedantic` and no warnings. A full CMake+GCC build couldn't run on this machine (w64devkit
+  links fail under CMake's compiler detection), so the Linux CI job is the real check.

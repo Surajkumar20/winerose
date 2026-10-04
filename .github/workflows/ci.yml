@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Full product build on Windows: plugin (VST3 / CLAP / Standalone), tools, all tests, pluginval.
+  # Uses the VS 2022 preset because hosted runners ship VS 2022; local development uses vs2026.
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, test, pluginval
+        shell: pwsh
+        run: ./scripts/build.ps1 -Preset vs2022 -Config Release
+      - name: Upload plugin artefacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: winerose-windows-x64
+          path: |
+            build/vs2022/src/plugin/Winerose_artefacts/Release/VST3
+            build/vs2022/src/plugin/Winerose_artefacts/Release/CLAP
+            build/vs2022/src/plugin/Winerose_artefacts/Release/Standalone
+      - name: Upload golden mismatches
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-actual-windows
+          path: build/vs2022/golden-actual
+          if-no-files-found: ignore
+
+  # The JUCE-free layers must build and pass on other compilers and OSes. This is the standing check that
+  # params / engine / presets / control stay portable and UI-independent (PLAN.md §1).
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ninja (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Install Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+      - name: Configure
+        run: cmake --preset ninja-core
+      - name: Build
+        run: cmake --build --preset ninja-core-release
+      - name: Test
+        run: ctest --preset ninja-core-release
+      - name: Upload golden mismatches
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-actual-${{ matrix.os }}
+          path: build/ninja-core/golden-actual
+          if-no-files-found: ignore

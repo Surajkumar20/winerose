@@ -14,11 +14,16 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 option(WINEROSE_BUILD_PLUGIN "Build the JUCE plugin adapter + JUCE UI (VST3/Standalone)" ON)
 option(WINEROSE_BUILD_CLAP   "Also build a CLAP via clap-juce-extensions"                ON)
 option(WINEROSE_BUILD_TESTS  "Build Catch2 unit tests"                                   ON)
+option(WINEROSE_BUILD_TOOLS  "Build param_schema / preset_dump (+ measure_host with JUCE)" ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(WineroseDependencies)
 include(WineroseTargetDefaults)
 include(WineroseLayering)
+
+if(WINEROSE_BUILD_TESTS)
+    enable_testing()   # before any add_subdirectory: tests are declared next to the code they cover
+endif()
 
 add_subdirectory(libs)   # vendored hiir + pffft
 
@@ -32,8 +37,19 @@ if(WINEROSE_BUILD_PLUGIN)
     add_subdirectory(src/plugin)
 endif()
 
+# The offline render harness is needed by the golden tests even when the other tools are off.
+if(WINEROSE_BUILD_TOOLS OR WINEROSE_BUILD_TESTS)
+    add_subdirectory(tools/render)
+endif()
+if(WINEROSE_BUILD_TOOLS)
+    add_subdirectory(tools/param_schema)
+    add_subdirectory(tools/preset_dump)
+    if(WINEROSE_BUILD_PLUGIN)
+        add_subdirectory(tools/measure_host)
+    endif()
+endif()
+
 if(WINEROSE_BUILD_TESTS)
-    enable_testing()
     add_subdirectory(tests)
 endif()
 
