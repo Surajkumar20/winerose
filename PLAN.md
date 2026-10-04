@@ -217,7 +217,9 @@ get/setStateInformation → m_config->serialize() / restore() → validate() →
 createEditor   → WineroseEditor(*m_controller)        // swap this line for a WebBrowserComponent editor later
 ```
 
-Host parameter IDs = namespaced keys (`Filter0.cutoff`), and the VST3 numeric IDs come from `vst3_id`.
+Host parameter IDs = namespaced keys (`Filter0.cutoff`). JUCE derives each VST3 numeric ID from a hash of
+that string, so the numeric ID is stable as long as the key is. `vst3_id` is metadata only: the Serum 2 ID,
+used by `compat/` and `measure_host`.
 **Both are permanent once shipped.** They are engine names, never Serum's `kParam*` names; that mapping lives
 in `compat/`.
 
@@ -266,9 +268,10 @@ plainParams == "default" → reg->resetToDefaults()
 ## 4. File layout (deltas vs SPEC 5.1)
 
 ```
-src/params/     ConfigManager.{h,cpp,ipp} ParamRegistry.{h,cpp,ipp} ParamHandle.h ParamListener.h
-                EngineSnapshot.h GlobalSettings.{h,cpp}                       → winerose_params
-src/engine/ osc/ filter/ mod/ seq/ fx/                                       → winerose_engine
+src/params/     ParamTypes ConfigManager ParamRegistry ParamHandle.h ParamListener.h Realtime.h
+                SnapshotExchange.h GlobalSettings                             → winerose_params
+                (each layer: src/<layer>/include/<layer>/*.h + src/<layer>/src/*.cpp)
+src/engine/     Engine EngineTypes.h Smoother.h (+ EngineSnapshot); osc/ filter/ mod/ seq/ fx/ → winerose_engine
 src/io/ compat/                                                              → winerose_presets
 src/control/    IController.h Controller.{h,cpp} EditHistory.{h,cpp} Json.h  → winerose_control
 src/plugin/     WineroseProcessor RegistryParameter HostSync                 → winerose_plugin (JUCE)
@@ -292,3 +295,34 @@ tests/unit tests/golden tests/arch      tools/param_schema tools/measure_host to
    parsing.
 5. **feature/UI:** an edit in ParamTableView shows up in the host automation lane; undo reverts it;
    `winerose_ui_juce` links only control + JUCE.
+
+---
+
+## 6. As built on `VST_cmake_config`
+
+Where the code differs from, or adds detail to, the sections above:
+
+- **Toolchain:** Visual Studio 2026 (MSVC 14.51), using the CMake 4.3 bundled with VS (generator
+  `Visual Studio 18 2026`); CMake 4.0 has no VS 2026 generator. JUCE **8.0.15** (the SPEC's major version;
+  9.0.3 also exists). clap-juce-extensions is pinned to commit `55525c9` because the 0.26.0 tag doesn't
+  compile against JUCE ≥ 8.0.11. Static MSVC runtime.
+- **`WINEROSE_BUILD_PLUGIN=OFF`** builds params/engine/presets/control + tests without fetching JUCE. This is
+  the standing proof that those layers don't depend on JUCE.
+- **Layering enforcement** is `cmake/WineroseLayering.cmake`, run at configure time: link-graph rules plus an
+  `#include` scan for each layer. It covers what PLAN.md §2 listed under `tests/arch`.
+- **`winerose_ui_juce` is an INTERFACE library**, compiled inside the plugin target. A static library that
+  links JUCE modules would compile them twice. Its "control only" rule is enforced by the link rule and the
+  include scan.
+- **Generic pieces live in params, engine-specific ones in engine:** `SnapshotExchange<T>` (lock-free
+  publish/retire) is in params, and `EngineSnapshot` is in engine.
+- **Host automation path:** `RegistryParameter::setValue` stores into the ConfigManager slot. A 30 Hz
+  `HostSync` timer turns that into `ConfigManager::notifyChanged` (never echoed back to the host). Control-layer
+  changes are pushed with `setValueNotifyingHost` under `ScopedOwnWrite`, so the exact plain value is never
+  re-derived from a normalized float.
+- **Batches nest** (a depth counter), unlike the example's single flag. `Controller::loadState` = batch {reset
+  every registry to defaults → `restore` → `clampAndApply`}, so keys missing from older states don't keep the
+  previous patch's values.
+- **Unit tests (Catch2) start here** for the core layers (43 cases). `feature/build` adds golden renders,
+  pluginval scripting and CI.
+- **Verified:** core-only and full builds with 0 warnings in Winerose code; all unit tests pass;
+  `pluginval 1.0.4 --strictness-level 10` passes on the Release VST3. **Not yet verified:** loading in FL Studio.
