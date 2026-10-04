@@ -67,8 +67,7 @@ void Voice::prepare(double sampleRate) noexcept
     for (auto& d : m_down) d.set_coefs(g_downCoefs);
     resetDownsamplers();
     for (auto& e : m_env) e.reset();
-    m_svfL.reset();
-    m_svfR.reset();
+    for (auto& f : m_filters) f.prepare(sampleRate);
     m_released = true;
     m_sustained = false;
     m_note = -1;
@@ -209,9 +208,11 @@ void Voice::evaluateModulation(const ControlContext& ctx) noexcept
     mods.build(m_plain.data(), m_sampleRate, m_settings);
     m_settings.control.oversample = ctx.oversample;
     m_settings.control.bendSemis  = ctx.global.bendSemis;
-    m_cutoffNorm = static_cast<float>(toNormalized(mods.targets.at(mods.filter0->cutoffIndex()).meta,
-                                                   m_settings.control.filter.cutoffHz));
-    m_resonance = m_settings.control.filter.resonance;
+    for (int f = 0; f < modules::FilterModule::kCount; ++f) {
+        const auto& meta = mods.targets.at(mods.filter[static_cast<std::size_t>(f)]->cutoffIndex()).meta;
+        m_cutoffNorm[static_cast<std::size_t>(f)] = static_cast<float>(
+            toNormalized(meta, m_settings.control.filter[static_cast<std::size_t>(f)].settings.cutoffHz));
+    }
 }
 
 void Voice::configureModSources(const ControlContext& ctx) noexcept
@@ -275,8 +276,7 @@ void Voice::start(int note, int velocity, std::uint64_t order, const ControlCont
     evaluateModulation(ctx);
     configureModSources(ctx);
 
-    m_svfL.reset();
-    m_svfR.reset();
+    for (auto& f : m_filters) f.reset();
     resetDownsamplers();
     m_oversample = ctx.oversample;
     layout(m_settings.control);
@@ -370,8 +370,19 @@ void Voice::layout(const VoiceControl& control) noexcept
         }
     }
 
+    // Which non-audible sources the warps still need as modulators.
+    bool warpNeedsSub = false, warpNeedsNoise = false;
+    for (const auto& v : control.osc) {
+        if (!v.enabled) continue;
+        for (auto m : {v.warp1, v.warp2}) {
+            warpNeedsSub   |= dsp::warpInput(m) == dsp::WarpInput::Sub;
+            warpNeedsNoise |= dsp::warpInput(m) == dsp::WarpInput::Noise;
+        }
+    }
+
     // Sub
     m_subOn    = control.sub.enabled;
+    m_subNeeded = m_subOn || warpNeedsSub;
     m_subShape = static_cast<int>(control.sub.shape);
     m_subInc   = std::min(hzForSemis(static_cast<double>(m_note) - 69.0 + control.sub.pitchSemis + control.bendSemis) / sr, 0.5) / os;
     m_subLevels = dsp::WavetableBank::selectLevel(m_subInc);
@@ -379,38 +390,88 @@ void Voice::layout(const VoiceControl& control) noexcept
 
     // Noise: rate in table samples per output sample (the tables are "recorded" at the engine rate).
     m_noiseOn   = control.noise.enabled;
+    m_noiseNeeded = m_noiseOn || warpNeedsNoise;
     m_noiseType = control.noise.type;
     const double noiseSemis = (control.noise.keytrack ? static_cast<double>(m_note) - 60.0 : 0.0) + control.noise.pitchSemis;
     m_noiseRate = std::exp2(noiseSemis / 12.0) / os;
     panGains(control.noise.pan, m_noiseGainL, m_noiseGainR);
 
-    // Filter
-    if (control.filter.enabled != m_filterOn) {
-        m_svfL.reset();
-        m_svfR.reset();
+    // Routing weights per source and bus.
+    auto routeOf = [&](int src) -> std::pair<modules::Route, float> {
+        if (src < kOscCount) return {control.osc[static_cast<std::size_t>(src)].route, control.osc[static_cast<std::size_t>(src)].filterBalance};
+        if (src == kNoiseSource) return {control.noise.route, control.noise.filterBalance};
+        return {control.sub.route, control.sub.filterBalance};
+    };
+    // Where each filter bus really ends up when its filter is bypassed (disabled filters pass through):
+    // serial F1 → F2's input; otherwise straight to the filter's output target.
+    const bool serial = control.filterRouting == modules::FilterRouting::Serial;
+    auto targetBus = [&](int f) {
+        return control.filter[static_cast<std::size_t>(f)].output == modules::FilterOutput::Direct ? kBusDirect : kBusMain;
+    };
+    const bool f1On = control.filter[0].enabled, f2On = control.filter[1].enabled;
+    const int f2Bus = f2On ? kBusF2 : targetBus(1);
+    const int f1Bus = f1On ? kBusF1 : (serial ? f2Bus : targetBus(0));
+
+    m_busUsed.fill(false);
+    for (int src = 0; src < kSourceCount; ++src) {
+        auto& send = m_sends[static_cast<std::size_t>(src)];
+        send.count = 0;
+        auto add = [&](int bus, float gain) {
+            if (gain == 0.0f) return;
+            for (int i = 0; i < send.count; ++i)
+                if (send.bus[i] == bus) { send.gain[i] += gain; return; }
+            send.bus[send.count] = bus;
+            send.gain[send.count] = gain;
+            ++send.count;
+            m_busUsed[static_cast<std::size_t>(bus)] = true;
+        };
+        const auto [route, balance] = routeOf(src);
+        switch (route) {
+            case modules::Route::Filter: {
+                const float b = std::clamp(balance, 0.0f, 1.0f);
+                add(f1Bus, 1.0f - b);
+                add(f2Bus, b);
+                break;
+            }
+            case modules::Route::Main:   add(kBusMain, 1.0f); break;
+            case modules::Route::Direct: add(kBusDirect, 1.0f); break;
+            case modules::Route::None:
+            case modules::Route::Count:  break;
+        }
     }
-    m_filterOn = control.filter.enabled;
-    m_coefs    = control.filterCoefs;
+
+    // Filters: keytrack folds into the cutoff (100% = one octave per octave from C4).
+    m_filterRouting = control.filterRouting;
+    for (int f = 0; f < modules::FilterModule::kCount; ++f) {
+        const auto& fv = control.filter[static_cast<std::size_t>(f)];
+        m_filterOn[static_cast<std::size_t>(f)]  = fv.enabled;
+        m_filterOut[static_cast<std::size_t>(f)] = fv.output;
+        const float mul = std::exp2(fv.keytrack * (static_cast<float>(m_note) - 60.0f) / 12.0f);
+        m_keytrackMul[static_cast<std::size_t>(f)] = mul;
+        dsp::FilterSettings fs = fv.settings;
+        fs.cutoffHz *= mul;
+        m_filters[static_cast<std::size_t>(f)].set(fs);
+    }
 }
 
 // --- Audio --------------------------------------------------------------------------------------------
 
-void Voice::render(float* left, float* right, int numSamples, const VoiceTables& tables) noexcept
+void Voice::render(float* mainL, float* mainR, float* directL, float* directR, int numSamples,
+                   const VoiceTables& tables) noexcept
 {
     if (!m_env[0].isActive()) return;
 
     const int os = m_oversample;
-    float bufL[kControlBlock * kMaxOversample];
-    float bufR[kControlBlock * kMaxOversample];
-    float cutoffHz[kControlBlock];
-    bool  fastCutoff = false;
+    float buf[kBusCount][2][kControlBlock * kMaxOversample];
+    float cutoffHz[modules::FilterModule::kCount][kControlBlock];
+    bool  fastCutoff[modules::FilterModule::kCount] = {};
 
     for (int i = 0; i < numSamples; ++i) {
         // Per base sample: smoothed per-oscillator values, plus audio-rate LFO modulation on top.
         float wt[kOscCount], level[kOscCount], pitchRatio[kOscCount];
         float dPitch[kOscCount] = {}, dLevel[kOscCount] = {}, dWt[kOscCount] = {};
-        float dCutoff = 0.0f;
-        bool  cutoffMod = false;
+        float dCutoff[modules::FilterModule::kCount] = {};
+        bool  cutoffMod[modules::FilterModule::kCount] = {};
         if (m_fastCount > 0) {
             float lfoValue[modulation::kLfoCount];
             for (int l = 0; l < modulation::kLfoCount; ++l)
@@ -422,7 +483,7 @@ void Voice::render(float* left, float* right, int numSamples, const VoiceTables&
                     case modules::FastDest::Kind::OscPitch:     dPitch[fs.dest.osc] += d * fs.dest.span; break;
                     case modules::FastDest::Kind::OscLevel:     dLevel[fs.dest.osc] += d * fs.dest.span; break;
                     case modules::FastDest::Kind::OscWtPos:     dWt[fs.dest.osc]    += d * fs.dest.span; break;
-                    case modules::FastDest::Kind::FilterCutoff: dCutoff += d; cutoffMod = true; break;
+                    case modules::FastDest::Kind::FilterCutoff: dCutoff[fs.dest.osc] += d; cutoffMod[fs.dest.osc] = true; break;
                     case modules::FastDest::Kind::None: break;
                 }
             }
@@ -433,13 +494,15 @@ void Voice::render(float* left, float* right, int numSamples, const VoiceTables&
             level[o] = std::max(0.0f, osc.level.next() + dLevel[o]);
             pitchRatio[o] = dPitch[o] != 0.0f ? std::exp2(dPitch[o] / 12.0f) : 1.0f;
         }
-        if (cutoffMod) {
-            fastCutoff = true;
-            cutoffHz[i] = static_cast<float>(fromNormalized(
-                m_modules->targets.at(m_modules->filter0->cutoffIndex()).meta,
-                std::clamp(static_cast<double>(m_cutoffNorm + dCutoff), 0.0, 1.0)));
-        } else {
-            cutoffHz[i] = -1.0f;
+        for (int f = 0; f < modules::FilterModule::kCount; ++f) {
+            if (cutoffMod[f]) {
+                fastCutoff[f] = true;
+                cutoffHz[f][i] = m_keytrackMul[static_cast<std::size_t>(f)] * static_cast<float>(fromNormalized(
+                    m_modules->targets.at(m_modules->filter[static_cast<std::size_t>(f)]->cutoffIndex()).meta,
+                    std::clamp(static_cast<double>(m_cutoffNorm[static_cast<std::size_t>(f)] + dCutoff[f]), 0.0, 1.0)));
+            } else {
+                cutoffHz[f][i] = -1.0f;
+            }
         }
         const float subLevel   = m_subLevel.next();
         const float noiseLevel = m_noiseLevel.next();
@@ -457,26 +520,29 @@ void Voice::render(float* left, float* right, int numSamples, const VoiceTables&
         }
 
         for (int s = 0; s < os; ++s) {
-            float accL = 0.0f, accR = 0.0f;
+            float acc[kBusCount][2] = {};
+            auto send = [&](int src, float l, float r) {
+                const auto& sd = m_sends[static_cast<std::size_t>(src)];
+                for (int i = 0; i < sd.count; ++i) {
+                    acc[sd.bus[i]][0] += l * sd.gain[i];
+                    acc[sd.bus[i]][1] += r * sd.gain[i];
+                }
+            };
 
             float sub = 0.0f;
-            if (m_subOn && tables.sub != nullptr) {
+            if (m_subNeeded && tables.sub != nullptr) {
                 sub = tables.sub->read(m_subPhase, static_cast<float>(m_subShape), m_subLevels);
                 m_subPhase += m_subInc;
                 if (m_subPhase >= 1.0) m_subPhase -= 1.0;
-                accL += sub * subLevel * m_subGainL;
-                accR += sub * subLevel * m_subGainR;
+                if (m_subOn) send(kSubSource, sub * subLevel * m_subGainL, sub * subLevel * m_subGainR);
             }
 
             float noise = 0.0f;
-            if (tables.noise != nullptr) {
+            if (m_noiseNeeded && tables.noise != nullptr) {
                 noise = tables.noise->read(m_noiseType, m_noisePos);
                 m_noisePos += m_noiseRate;
                 if (m_noisePos >= dsp::NoiseTables::kLength) m_noisePos -= dsp::NoiseTables::kLength;
-                if (m_noiseOn) {
-                    accL += noise * noiseLevel * m_noiseGainL;
-                    accR += noise * noiseLevel * m_noiseGainR;
-                }
+                if (m_noiseOn) send(kNoiseSource, noise * noiseLevel * m_noiseGainL, noise * noiseLevel * m_noiseGainR);
             }
 
             for (int o = 0; o < kOscCount; ++o) {
@@ -518,37 +584,71 @@ void Voice::render(float* left, float* right, int numSamples, const VoiceTables&
                     mono += x;
                 }
                 osc.last = mono / static_cast<float>(osc.count);
-                accL += oscL * level[o];
-                accR += oscR * level[o];
+                send(o, oscL * level[o], oscR * level[o]);
             }
 
-            bufL[i * os + s] = accL;
-            bufR[i * os + s] = accR;
+            for (int b = 0; b < kBusCount; ++b) {
+                if (!m_busUsed[static_cast<std::size_t>(b)]) continue;
+                buf[b][0][i * os + s] = acc[b][0];
+                buf[b][1][i * os + s] = acc[b][1];
+            }
         }
     }
 
-    // Decimate to the base rate (in place: each stage halves the length).
-    if (os == 4) {
-        m_down[0].process_block(bufL, bufL, numSamples * 2);
-        m_down[1].process_block(bufR, bufR, numSamples * 2);
-    }
+    // Decimate each used bus to the base rate (in place: each stage halves the length).
     if (os >= 2) {
-        m_down[2].process_block(bufL, bufL, numSamples);
-        m_down[3].process_block(bufR, bufR, numSamples);
+        for (int b = 0; b < kBusCount; ++b) {
+            if (!m_busUsed[static_cast<std::size_t>(b)]) continue;
+            auto* d = &m_down[static_cast<std::size_t>(b * 4)];
+            if (os == 4) {
+                d[0].process_block(buf[b][0], buf[b][0], numSamples * 2);
+                d[1].process_block(buf[b][1], buf[b][1], numSamples * 2);
+            }
+            d[2].process_block(buf[b][0], buf[b][0], numSamples);
+            d[3].process_block(buf[b][1], buf[b][1], numSamples);
+        }
     }
 
+    // Filters (serial: F1 → F2; parallel: independent), each to its output target; then the amp envelope.
+    const bool filtersUsed = m_busUsed[kBusF1] || m_busUsed[kBusF2];
+    const bool serial = m_filterRouting == modules::FilterRouting::Serial;
     for (int i = 0; i < numSamples; ++i) {
-        float l = bufL[i], r = bufR[i];
-        if (m_filterOn) {
-            const dsp::Svf::Coefs coefs = (fastCutoff && cutoffHz[i] > 0.0f)
-                ? dsp::Svf::compute(cutoffHz[i], m_resonance, m_sampleRate) : m_coefs;
-            l = m_svfL.processLow(l, coefs);
-            r = m_svfR.processLow(r, coefs);
+        float outMain[2]   = {m_busUsed[kBusMain] ? buf[kBusMain][0][i] : 0.0f, m_busUsed[kBusMain] ? buf[kBusMain][1][i] : 0.0f};
+        float outDirect[2] = {m_busUsed[kBusDirect] ? buf[kBusDirect][0][i] : 0.0f, m_busUsed[kBusDirect] ? buf[kBusDirect][1][i] : 0.0f};
+
+        if (filtersUsed) {
+            float f1l = m_busUsed[kBusF1] ? buf[kBusF1][0][i] : 0.0f, f1r = m_busUsed[kBusF1] ? buf[kBusF1][1][i] : 0.0f;
+            float f2l = m_busUsed[kBusF2] ? buf[kBusF2][0][i] : 0.0f, f2r = m_busUsed[kBusF2] ? buf[kBusF2][1][i] : 0.0f;
+            for (int f = 0; f < modules::FilterModule::kCount; ++f)
+                if (fastCutoff[f] && cutoffHz[f][i] > 0.0f) m_filters[static_cast<std::size_t>(f)].setCutoff(cutoffHz[f][i]);
+            // A bus only carries signal while its filter is enabled (bypassed filters were folded into the
+            // routing at control rate).
+            auto toTarget = [&](int f, float l, float r) {
+                float* dst = m_filterOut[static_cast<std::size_t>(f)] == modules::FilterOutput::Direct ? outDirect : outMain;
+                dst[0] += l;
+                dst[1] += r;
+            };
+            if (m_busUsed[kBusF1]) {
+                m_filters[0].process(f1l, f1r);
+                if (serial) {
+                    if (m_filterOn[1]) { f2l += f1l; f2r += f1r; }
+                    else               toTarget(1, f1l, f1r);   // F2 bypassed: F1 goes where F2 would
+                } else {
+                    toTarget(0, f1l, f1r);
+                }
+            }
+            if (m_busUsed[kBusF2] || (serial && m_busUsed[kBusF1] && m_filterOn[1])) {
+                m_filters[1].process(f2l, f2r);
+                toTarget(1, f2l, f2r);
+            }
         }
+
         const float amp = m_env[0].next();
         for (int e = 1; e < modulation::kEnvCount; ++e) m_env[static_cast<std::size_t>(e)].next();
-        left[i]  += l * amp;
-        right[i] += r * amp;
+        mainL[i]   += outMain[0] * amp;
+        mainR[i]   += outMain[1] * amp;
+        directL[i] += outDirect[0] * amp;
+        directR[i] += outDirect[1] * amp;
     }
 
     // Control-rate LFOs advance in one step per chunk; audio-rate ones were ticked per sample above.

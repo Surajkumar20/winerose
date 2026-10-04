@@ -195,6 +195,7 @@ void Engine::process(float* const* out, int numChannels, int numSamples,
 
     float peakL = 0.0f, peakR = 0.0f;
     float left[voice::kControlBlock], right[voice::kControlBlock];
+    float directL[voice::kControlBlock], directR[voice::kControlBlock];
     int pos = 0, ev = 0;
 
     while (pos < numSamples || ev < numEvents) {
@@ -209,7 +210,14 @@ void Engine::process(float* const* out, int numChannels, int numSamples,
 
         std::memset(left, 0, sizeof(float) * static_cast<std::size_t>(n));
         std::memset(right, 0, sizeof(float) * static_cast<std::size_t>(n));
-        m_voices.render(left, right, n, tables);
+        std::memset(directL, 0, sizeof(float) * static_cast<std::size_t>(n));
+        std::memset(directR, 0, sizeof(float) * static_cast<std::size_t>(n));
+        m_voices.render(left, right, directL, directR, n, tables);
+        // Main is where the FX rack goes (Phase 5); Direct bypasses it.
+        for (int i = 0; i < n; ++i) {
+            left[i]  += directL[i];
+            right[i] += directR[i];
+        }
         advanceFreeLfos(n);
 
         for (int i = 0; i < n; ++i) {

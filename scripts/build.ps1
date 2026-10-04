@@ -7,6 +7,7 @@
     .\scripts\build.ps1 -Config Debug -SkipPluginval
     .\scripts\build.ps1 -Preset vs2026-core      # JUCE-free layers only (no JUCE download)
     .\scripts\build.ps1 -Clean                   # delete build\<preset> first
+    .\scripts\build.ps1 -SkipBenchmark           # skip CPU-threshold tests (unknown hardware, e.g. CI)
 
 .NOTES
     Works in Windows PowerShell 5.1 and PowerShell 7. Finds a CMake new enough for the chosen generator,
@@ -24,6 +25,7 @@ param(
     [switch]$Clean,
     [switch]$SkipTests,
     [switch]$SkipPluginval,
+    [switch]$SkipBenchmark,   # CPU thresholds only mean something on known hardware (CI uses this)
 
     [ValidateRange(1, 10)]
     [int]$Strictness = 10
@@ -104,7 +106,9 @@ try {
     Invoke-Checked "Configure ($Preset)" { & $cmake @configureArgs }
     Invoke-Checked "Build ($Config)"     { & $cmake --build $BuildDir --config $Config --parallel }
     if (-not $SkipTests) {
-        Invoke-Checked "Test ($Config)"  { & $ctest --test-dir $BuildDir -C $Config --output-on-failure }
+        $ctestArgs = @('--test-dir', $BuildDir, '-C', $Config, '--output-on-failure')
+        if ($SkipBenchmark) { $ctestArgs += @('-LE', 'benchmark') }
+        Invoke-Checked "Test ($Config)"  { & $ctest @ctestArgs }
     }
 } finally {
     Pop-Location

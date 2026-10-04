@@ -6,6 +6,7 @@
 #include "engine/dsp/Unison.h"
 #include "engine/dsp/Warp.h"
 #include "engine/dsp/WavetableBank.h"
+#include "engine/dsp/filters/FilterUnit.h"
 #include "engine/modulation/Lfo.h"
 #include "engine/modules/EngineModules.h"
 #include "engine/voice/VoiceSettings.h"
@@ -56,9 +57,10 @@ struct ControlContext {
 
 /**
  * @class Voice
- * @brief One note (SPEC §5.4 Phases 1-3): oscillators A/B/C (unison, dual warp) + noise + sub → optional
- *        oversampling → stereo SVF low-pass → amp envelope, modulated per voice by Env1-4, LFO1-10, macros
- *        and performance sources through the 64-slot matrix.
+ * @brief One note (SPEC §5.4 Phases 1-4): oscillators A/B/C (unison, dual warp) + noise + sub, each routed
+ *        to Filter (balance 1↔2) / Main / Direct / None → optional oversampling → two filters (serial or
+ *        parallel, every FilterType) → amp envelope → Main and Direct outputs. Modulated per voice by
+ *        Env1-4, LFO1-10, macros and performance sources through the 64-slot matrix.
  *
  * Modulation runs at control rate (every kControlBlock samples): the voice copies the base values, applies
  * its matrix slots in normalized space, clamps, and rebuilds its settings. Slots from a (non-chaos) LFO to
@@ -82,8 +84,9 @@ public:
     /** Control tick: evaluate modulation, rebuild settings, recompute layout. */
     void control(const ControlContext& ctx) noexcept;
 
-    /** Adds into left/right (numSamples <= kControlBlock). */
-    void render(float* left, float* right, int numSamples, const VoiceTables& tables) noexcept;
+    /** Adds into the Main (→ FX) and Direct (→ output) buses (numSamples <= kControlBlock). */
+    void render(float* mainL, float* mainR, float* directL, float* directR, int numSamples,
+                const VoiceTables& tables) noexcept;
 
     bool          active() const noexcept { return m_env[0].isActive(); }
     bool          released() const noexcept { return m_released; }
@@ -133,27 +136,42 @@ private:
 
     std::array<Osc, kOscCount> m_osc {};
 
-    // Sub
+    // Sub (computed when audible or when a warp uses it as an FM source)
     bool   m_subOn = false;
+    bool   m_subNeeded = false;
     int    m_subShape = 0;
     double m_subPhase = 0.0, m_subInc = 0.0;
     dsp::WavetableBank::LevelChoice m_subLevels { 0, 0.0f };
     float  m_subGainL = 1.0f, m_subGainR = 1.0f;
     LinearSmoother m_subLevel;
 
-    // Noise
+    // Noise (read when audible or when a warp uses it as an FM source)
     bool   m_noiseOn = false;
+    bool   m_noiseNeeded = false;
     dsp::NoiseTables::Type m_noiseType = dsp::NoiseTables::Type::White;
     double m_noisePos = 0.0, m_noiseRate = 1.0;
     float  m_noiseGainL = 1.0f, m_noiseGainR = 1.0f;
     LinearSmoother m_noiseLevel;
 
+    // Routing: per source (osc A/B/C, noise, sub) the weight it sends to each bus.
+    enum Bus { kBusF1 = 0, kBusF2, kBusMain, kBusDirect, kBusCount };
+    static constexpr int kSourceCount = kOscCount + 2;   // osc 0..2, noise, sub
+    static constexpr int kNoiseSource = kOscCount, kSubSource = kOscCount + 1;
+    // Each source feeds at most two buses (a filter balance); bypassed filters are folded into the
+    // routing at control rate, so their buses only exist while the filter is actually running.
+    struct Send { int bus[2] = {kBusMain, kBusMain}; float gain[2] = {0.0f, 0.0f}; int count = 0; };
+    std::array<Send, kSourceCount> m_sends {};
+    std::array<bool, kBusCount> m_busUsed {};
+
     // Post-oscillator
     int m_oversample = 1;
-    std::array<hiir::Downsampler2xFpu<kDownsamplerCoefs>, 4> m_down;   // [L 4→2, R 4→2, L 2→1, R 2→1]
-    dsp::Svf m_svfL, m_svfR;
-    dsp::Svf::Coefs m_coefs {};
-    bool m_filterOn = false;
+    std::array<hiir::Downsampler2xFpu<kDownsamplerCoefs>, kBusCount * 4> m_down;   // per bus: [L 4→2, R 4→2, L 2→1, R 2→1]
+    std::array<dsp::FilterUnit, modules::FilterModule::kCount> m_filters;
+    std::array<bool, modules::FilterModule::kCount> m_filterOn {};
+    std::array<modules::FilterOutput, modules::FilterModule::kCount> m_filterOut {};
+    std::array<float, modules::FilterModule::kCount> m_cutoffNorm {};   // modulated, before keytrack (fast-path base)
+    std::array<float, modules::FilterModule::kCount> m_keytrackMul {};
+    modules::FilterRouting m_filterRouting = modules::FilterRouting::Serial;
 
     // Modulation
     std::array<dsp::Envelope, modulation::kEnvCount> m_env;   // m_env[0] = amplitude
@@ -162,8 +180,6 @@ private:
     std::array<bool, modulation::kLfoCount> m_lfoFast {};     // advanced per sample by the fast path
     std::array<FastSlot, modulation::kSlotCount> m_fast {};
     int   m_fastCount = 0;
-    float m_cutoffNorm = 0.0f;        // control-rate cutoff, normalized (base for fast cutoff modulation)
-    float m_resonance = 0.0f;
     std::array<float, modules::ModTargets::kMaxTargets> m_plain {};
     std::array<float, modules::ModTargets::kMaxTargets> m_delta {};
     std::array<std::int16_t, modulation::kSlotCount> m_touched {};

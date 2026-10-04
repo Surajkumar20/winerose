@@ -8,7 +8,9 @@ EngineModules::EngineModules(std::shared_ptr<ConfigManager> config)
         osc[static_cast<std::size_t>(o)] = std::make_unique<OscillatorModule>(config, o, targets);
     noise   = std::make_unique<NoiseModule>(config, targets);
     sub     = std::make_unique<SubOscModule>(config, targets);
-    filter0 = std::make_unique<FilterModule>(config, 0, targets);
+    for (int f = 0; f < FilterModule::kCount; ++f)
+        filter[static_cast<std::size_t>(f)] = std::make_unique<FilterModule>(config, f, targets);
+    routing = std::make_unique<RoutingModule>(config, targets);
     for (int e = 0; e < modulation::kEnvCount; ++e)
         env[static_cast<std::size_t>(e)] = std::make_unique<EnvelopeModule>(config, e, targets);
     for (int l = 0; l < modulation::kLfoCount; ++l)
@@ -33,7 +35,9 @@ EngineModules::EngineModules(std::shared_ptr<ConfigManager> config)
         fastDest[static_cast<std::size_t>(i.level)]  = {FastDest::Kind::OscLevel, oi, span(i.level)};
         fastDest[static_cast<std::size_t>(i.wtPos)]  = {FastDest::Kind::OscWtPos, oi, span(i.wtPos)};
     }
-    fastDest[static_cast<std::size_t>(filter0->cutoffIndex())] = {FastDest::Kind::FilterCutoff, 0, 0.0f};
+    for (int f = 0; f < FilterModule::kCount; ++f)
+        fastDest[static_cast<std::size_t>(filter[static_cast<std::size_t>(f)]->cutoffIndex())] =
+            {FastDest::Kind::FilterCutoff, static_cast<std::uint8_t>(f), 0.0f};
 }
 
 void EngineModules::build(const float* plain, double sampleRate, voice::VoiceSettings& out) const noexcept
@@ -43,11 +47,12 @@ void EngineModules::build(const float* plain, double sampleRate, voice::VoiceSet
         c.osc[static_cast<std::size_t>(o)] = osc[static_cast<std::size_t>(o)]->read(plain);
     c.noise  = noise->read(plain);
     c.sub    = sub->read(plain);
-    c.filter = filter0->read(plain);
+    for (int f = 0; f < FilterModule::kCount; ++f)
+        c.filter[static_cast<std::size_t>(f)] = filter[static_cast<std::size_t>(f)]->read(plain);
+    c.filterRouting = routing->read(plain);
     for (int e = 0; e < modulation::kEnvCount; ++e)
         out.env[static_cast<std::size_t>(e)] = env[static_cast<std::size_t>(e)]->read(plain);
     c.env = out.env[0];
-    c.filterCoefs = dsp::Svf::compute(c.filter.cutoffHz, c.filter.resonance, sampleRate);
     c.sampleRate = sampleRate;
     for (int l = 0; l < modulation::kLfoCount; ++l)
         out.lfo[static_cast<std::size_t>(l)] = lfo[static_cast<std::size_t>(l)]->read(plain);

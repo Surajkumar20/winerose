@@ -6,6 +6,7 @@ add_library(winerose_engine STATIC
     src/dsp/WavetableBank.cpp
     src/dsp/NoiseTable.cpp
     src/dsp/Curve.cpp
+    src/dsp/filters/FilterUnit.cpp
     src/modulation/ModTargets.cpp
     src/modulation/Lfo.cpp
     src/modules/EngineModules.cpp

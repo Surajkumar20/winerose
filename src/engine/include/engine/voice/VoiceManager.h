@@ -31,7 +31,8 @@ public:
     void allSoundOff() noexcept;   // silence immediately (CC 120)
 
     void control(const ControlContext& ctx) noexcept;
-    void render(float* left, float* right, int numSamples, const VoiceTables& tables) noexcept;
+    void render(float* mainL, float* mainR, float* directL, float* directR, int numSamples,
+                const VoiceTables& tables) noexcept;
 
     int activeCount() const noexcept;
 

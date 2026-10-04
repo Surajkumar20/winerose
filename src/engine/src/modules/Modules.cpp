@@ -35,6 +35,21 @@ E asEnum(float v, E count) noexcept
 
 bool asBool(float v) noexcept { return v >= 0.5f; }
 
+std::vector<EnumChoice> filterTypeChoices()
+{
+    std::vector<EnumChoice> out;
+    for (int i = 0; i < static_cast<int>(dsp::FilterType::Count); ++i) out.push_back({i, dsp::kFilterInfo[i].name});
+    return out;
+}
+
+// Every source gets the same routing pair (SPEC §1.1). By default only oscillator A goes to the filters.
+void registerRouting(ParamRegistry& r, Route defaultRoute, const std::string& group)
+{
+    r.registerEnum (route_keys::route, choices(kRouteNames), static_cast<int>(defaultRoute), group,
+                    "Signal destination: Filter (see balance), Main (through FX), Direct (bypass filters/FX), None");
+    r.registerFloat(route_keys::balance, 0.0f, 0.0f, 1.0f, group, "Filter balance: 0 = Filter 1, 1 = Filter 2");
+}
+
 } // namespace
 
 // --- Wavetable oscillator ----------------------------------------------------------------------------
@@ -74,6 +89,7 @@ OscillatorModule::OscillatorModule(std::shared_ptr<ConfigManager> config, int in
     r.registerFloat(osc_keys::warp2Amount, 0.0f, 0.0f, 1.0f, gw, "Warp 2 amount");
     r.registerString(osc_keys::remapCurve, dsp::Curve::identity().serialize(), gw,
                      "Remap 1/2 curve: \"x,y,curve;...\" from x=0 to x=1");
+    registerRouting(r, index == 0 ? Route::Filter : Route::Main, "Routing");
 
     m_i.enabled = t.add(r, osc_keys::enabled);       m_i.level = t.add(r, osc_keys::level);
     m_i.pan = t.add(r, osc_keys::pan);               m_i.octave = t.add(r, osc_keys::octave);
@@ -89,6 +105,8 @@ OscillatorModule::OscillatorModule(std::shared_ptr<ConfigManager> config, int in
     m_i.warp1Amount = t.add(r, osc_keys::warp1Amount);
     m_i.warp2Mode = t.add(r, osc_keys::warp2Mode);
     m_i.warp2Amount = t.add(r, osc_keys::warp2Amount);
+    m_i.route = t.add(r, route_keys::route);
+    m_i.balance = t.add(r, route_keys::balance);
 }
 
 OscillatorModule::Values OscillatorModule::read(const float* v) const noexcept
@@ -116,6 +134,8 @@ OscillatorModule::Values OscillatorModule::read(const float* v) const noexcept
     o.warp1Amount  = v[m_i.warp1Amount];
     o.warp2        = asEnum(v[m_i.warp2Mode], dsp::WarpMode::Count);
     o.warp2Amount  = v[m_i.warp2Amount];
+    o.route        = asEnum(v[m_i.route], Route::Count);
+    o.filterBalance = v[m_i.balance];
     return o;
 }
 
@@ -137,15 +157,17 @@ NoiseModule::NoiseModule(std::shared_ptr<ConfigManager> config, ModTargets& t)
     r.registerFloat(noise_keys::pan, 0.0f, -1.0f, 1.0f, g, "Pan");
     r.registerBool (noise_keys::keytrack, false, g, "Playback rate follows the note");
     r.registerFloat(noise_keys::pitch, 0.0f, -48.0f, 48.0f, g, "Playback-rate offset", ParamOpts{.unit = "st"});
+    registerRouting(r, Route::Main, "Routing");
     m_enabled = t.add(r, noise_keys::enabled);   m_type = t.add(r, noise_keys::type);
     m_level = t.add(r, noise_keys::level);       m_pan = t.add(r, noise_keys::pan);
     m_keytrack = t.add(r, noise_keys::keytrack); m_pitch = t.add(r, noise_keys::pitch);
+    m_route = t.add(r, route_keys::route);       m_balance = t.add(r, route_keys::balance);
 }
 
 NoiseModule::Values NoiseModule::read(const float* v) const noexcept
 {
     return Values{asBool(v[m_enabled]), asEnum(v[m_type], dsp::NoiseTables::Type::Count), v[m_level], v[m_pan],
-                  asBool(v[m_keytrack]), v[m_pitch]};
+                  asBool(v[m_keytrack]), v[m_pitch], asEnum(v[m_route], Route::Count), v[m_balance]};
 }
 
 // --- Sub ---------------------------------------------------------------------------------------------
@@ -160,14 +182,17 @@ SubOscModule::SubOscModule(std::shared_ptr<ConfigManager> config, ModTargets& t)
     r.registerInt  (sub_keys::octave, 0, -4, 4, g, "Octave (TODO-MEASURE default)");
     r.registerFloat(sub_keys::level, 0.75f, 0.0f, 1.0f, g, "Level");
     r.registerFloat(sub_keys::pan, 0.0f, -1.0f, 1.0f, g, "Pan");
+    registerRouting(r, Route::Main, "Routing");
     m_enabled = t.add(r, sub_keys::enabled);  m_shape = t.add(r, sub_keys::shape);
     m_octave = t.add(r, sub_keys::octave);    m_level = t.add(r, sub_keys::level);
     m_pan = t.add(r, sub_keys::pan);
+    m_route = t.add(r, route_keys::route);    m_balance = t.add(r, route_keys::balance);
 }
 
 SubOscModule::Values SubOscModule::read(const float* v) const noexcept
 {
-    return Values{asBool(v[m_enabled]), asEnum(v[m_shape], dsp::SubShape::Count), v[m_octave] * 12.0f, v[m_level], v[m_pan]};
+    return Values{asBool(v[m_enabled]), asEnum(v[m_shape], dsp::SubShape::Count), v[m_octave] * 12.0f, v[m_level], v[m_pan],
+                  asEnum(v[m_route], Route::Count), v[m_balance]};
 }
 
 // --- Filter ------------------------------------------------------------------------------------------
@@ -177,19 +202,66 @@ FilterModule::FilterModule(std::shared_ptr<ConfigManager> config, int index, Mod
 {
     auto& r = *m_registry;
     const std::string g = "Filter";
-    r.registerBool (filter_keys::enabled, false, g, "Filter on/off (Filter 1 starts disabled, SPEC §1.1)");
+    r.registerBool (filter_keys::enabled, false, g, "Filter on/off; off passes the routed signal through (SPEC 1.1)");
+    r.registerEnum (filter_keys::type, filterTypeChoices(), static_cast<int>(dsp::FilterType::Lp12), g,
+                    "Filter type (Winerose's own list; Serum types are mapped by the preset importer)");
     r.registerFloat(filter_keys::cutoff, 425.0f, 8.18f, 22050.0f, g,
                     "Cutoff (exponential knob, INFERRED range 8.18 Hz - 22.05 kHz)",
                     ParamOpts{NumericMeta::Curve::Exp, 1.0, "Hz"});
     r.registerFloat(filter_keys::resonance, 0.1f, 0.0f, 1.0f, g, "Resonance (TODO-MEASURE default)");
-    m_enabled   = t.add(r, filter_keys::enabled);
-    m_cutoff    = t.add(r, filter_keys::cutoff);
-    m_resonance = t.add(r, filter_keys::resonance);
+    r.registerFloat(filter_keys::drive, 0.0f, 0.0f, 1.0f, g, "Drive into the filter (0..+24 dB with saturation)");
+    r.registerBool (filter_keys::clean, false, g, "Clean drive: level into the filter without the input saturator");
+    r.registerFloat(filter_keys::var, 0.5f, 0.0f, 1.0f, g, "Var: morph / second cutoff / damping / vowel, per type");
+    r.registerFloat(filter_keys::x, 0.0f, 0.0f, 1.0f, g, "PZ Morph X: low-pass to band-pass to high-pass");
+    r.registerFloat(filter_keys::y, 0.5f, 0.0f, 1.0f, g, "PZ Morph Y: notch / neutral / peak");
+    r.registerFloat(filter_keys::stereo, 0.0f, 0.0f, 1.0f, g, "L/R cutoff spread (up to +/- half an octave, INFERRED)");
+    r.registerFloat(filter_keys::mix, 1.0f, 0.0f, 1.0f, g, "Dry/wet");
+    r.registerFloat(filter_keys::level, 1.0f, 0.0f, 2.0f, g, "Output level (linear)");
+    r.registerFloat(filter_keys::keytrack, 0.0f, 0.0f, 1.0f, g, "Keytrack: 100% = one octave of cutoff per octave");
+    r.registerEnum (filter_keys::output, choices(kFilterOutputNames), 0, g, "Output: Main (through FX) or Direct");
+    m_enabled = t.add(r, filter_keys::enabled);     m_type = t.add(r, filter_keys::type);
+    m_cutoff = t.add(r, filter_keys::cutoff);       m_resonance = t.add(r, filter_keys::resonance);
+    m_drive = t.add(r, filter_keys::drive);         m_clean = t.add(r, filter_keys::clean);
+    m_var = t.add(r, filter_keys::var);             m_x = t.add(r, filter_keys::x);
+    m_y = t.add(r, filter_keys::y);                 m_stereo = t.add(r, filter_keys::stereo);
+    m_mix = t.add(r, filter_keys::mix);             m_level = t.add(r, filter_keys::level);
+    m_keytrack = t.add(r, filter_keys::keytrack);   m_output = t.add(r, filter_keys::output);
 }
 
 FilterModule::Values FilterModule::read(const float* v) const noexcept
 {
-    return Values{asBool(v[m_enabled]), v[m_cutoff], v[m_resonance]};
+    Values out;
+    out.enabled = asBool(v[m_enabled]);
+    auto& s = out.settings;
+    s.type      = asEnum(v[m_type], dsp::FilterType::Count);
+    s.cutoffHz  = v[m_cutoff];
+    s.resonance = v[m_resonance];
+    s.drive     = v[m_drive];
+    s.clean     = asBool(v[m_clean]);
+    s.var       = v[m_var];
+    s.x         = v[m_x];
+    s.y         = v[m_y];
+    s.stereo    = v[m_stereo];
+    s.mix       = v[m_mix];
+    s.level     = v[m_level];
+    out.keytrack = v[m_keytrack];
+    out.output   = asEnum(v[m_output], FilterOutput::Count);
+    return out;
+}
+
+// --- Routing -----------------------------------------------------------------------------------------
+
+RoutingModule::RoutingModule(std::shared_ptr<ConfigManager> config, ModTargets& t)
+    : m_registry(std::make_unique<ParamRegistry>(std::move(config), "Routing"))
+{
+    m_registry->registerEnum("filterRouting", choices(kFilterRoutingNames), 0, "Routing",
+                             "Serial: Filter 1 feeds Filter 2. Parallel: independent (TODO-MEASURE default)");
+    m_filterRouting = t.add(*m_registry, "filterRouting");
+}
+
+FilterRouting RoutingModule::read(const float* v) const noexcept
+{
+    return asEnum(v[m_filterRouting], FilterRouting::Count);
 }
 
 // --- Envelope ----------------------------------------------------------------------------------------

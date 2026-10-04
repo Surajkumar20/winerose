@@ -23,9 +23,9 @@ struct VoiceControl {
     std::array<modules::OscillatorModule::Values, kOscCount> osc {};
     modules::NoiseModule::Values  noise {};
     modules::SubOscModule::Values sub {};
-    modules::FilterModule::Values filter {};
+    std::array<modules::FilterModule::Values, modules::FilterModule::kCount> filter {};
+    modules::FilterRouting        filterRouting = modules::FilterRouting::Serial;
     dsp::Envelope::Settings       env {};          // Env0 (amplitude)
-    dsp::Svf::Coefs               filterCoefs {};
     double                        sampleRate = 48000.0;
     int                           oversample = 1;  // 1, 2 or 4 (Quality, only when a warp needs it)
     float                         bendSemis = 0.0f;

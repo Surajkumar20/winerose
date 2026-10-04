@@ -461,3 +461,38 @@ Where the code differs from, or adds detail to, the sections above:
   the real mod-matrix UI belongs to `feature/UI`.
 - **Not yet:** BPM-synced envelopes, Start/End on envelopes 2–4, LFO loopback point (Env mode), poly
   aftertouch / MPE sources, and audio-rate oscillator/filter outputs as sources (Serum 2) — later phases.
+
+### Phase 4 (SPEC §5.4): done
+
+- **Enum ownership (applies project-wide):** every enum Winerose exposes (filter types, warps, unison stacks,
+  sub shapes, LFO shapes, mod sources, …) is **our** list in **our** order; its index is what hosts store for
+  automation. Serum's menus are mapped onto ours by `compat/` in `feature/presets`, so measuring Serum never
+  renumbers a Winerose enum. Append new entries at the end only. The "TODO-MEASURE order" notes in earlier
+  tooltips now mean "the compat mapping needs measuring", not "our order may change".
+- **Filters:** `dsp::FilterUnit` (stereo, per voice) implements 59 types in 19 families (`FilterTypes.h`):
+  - SVF 6/12/18/24 dB in LP/HP/BP/notch/peak/allpass, SVF morphs, dual SVF, linear ladder (6–24, HP)
+  - driven ladder, acid, Sallen-Key (the nonlinear families, 2× oversampled with HIIR)
+  - combs ±, damped combs, flanges, phasers (4/8/12, negative feedback), formant (male/female vowels)
+  - sample & hold, ring mod, twin LP, FDN reverb, disperser, diffuser, PZ morph (X/Y)
+- **Per-filter controls:** type, cutoff, resonance, drive (0..+24 dB), Clean (drive without the input
+  saturator: linear types stay clean), var, X/Y, stereo (±½ octave L/R), mix, level, keytrack (100% = 1 oct/oct
+  from C4), output (Main/Direct). `Filter1` has the same parameters as `Filter0`.
+- **Routing:**
+  - Every source (`Oscillator0..4`) has `route` (Filter/Main/Direct/None) and `filterBalance`. The defaults
+    follow Serum: A → Filter, everything else → Main.
+  - `Routing.filterRouting` sets serial (F1 → F2) or parallel. A disabled filter passes its signal through;
+    bypassed filters are folded into the routing at control rate, so they cost nothing.
+  - Voices render separate Main and Direct buses; the Phase 5 FX rack goes on Main.
+- **Acceptance:**
+  - Linear responses vs bilinear analytic: worst deviation **0.0013 dB** over 112 checks (criterion 0.5 dB).
+  - Feedback comb vs `(1-|g|)/(1-g·z^-D)` exact.
+  - All six nonlinear types self-oscillate stably at 999–1000 Hz for a 1 kHz cutoff, peak < 0.8.
+  - Every type stays finite under 40 blocks of random parameters, random input up to 4.0 and audio-rate
+    cutoff jumps.
+- **CPU:** routing pushed the acceptance scenario to 26.5%. Two fixes brought it back to **24.3%** (criterion
+  < 25%): folding bypassed filters into the routing, and skipping the noise/sub reads unless audible or needed
+  as an FM source (that also fixed "FM (Sub)" with the sub off). **Headroom is now small: SIMD across unison
+  voices is the next performance task before more per-voice work lands.**
+- **CI** runs with `-SkipBenchmark` / `-LE benchmark`: CPU thresholds only make sense on known hardware.
+- **Not yet:** filter-type mapping from Serum (feature/presets); BUS 1/2 sends (with the Phase 5 buses); Serum 2's
+  "osc/filter as modulation source".

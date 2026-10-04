@@ -6,6 +6,7 @@
 #include "engine/dsp/Unison.h"
 #include "engine/dsp/Warp.h"
 #include "engine/dsp/WavetableBank.h"
+#include "engine/dsp/filters/FilterUnit.h"
 #include "engine/modulation/Lfo.h"
 #include "engine/modulation/ModTargets.h"
 #include "engine/modulation/Sources.h"
@@ -27,6 +28,24 @@ namespace winerose::modules {
 // await the measure_host sweep of Serum 2 (SPEC §5.10).
 
 using modulation::ModTargets;
+
+// Where a source's signal goes (SPEC §1.1 routing): through the filters (with a Filter 1 ↔ 2 balance), to
+// Main (through the FX, Phase 5), Direct (bypassing filters and FX), or nowhere (modulation-only).
+enum class Route : int { Filter = 0, Main, Direct, None, Count };
+inline constexpr const char* kRouteNames[] = {"Filter", "Main", "Direct", "None"};
+
+// Where a filter's output goes.
+enum class FilterOutput : int { Main = 0, Direct, Count };
+inline constexpr const char* kFilterOutputNames[] = {"Main", "Direct"};
+
+// How the two filters connect.
+enum class FilterRouting : int { Serial = 0, Parallel, Count };
+inline constexpr const char* kFilterRoutingNames[] = {"Serial", "Parallel"};
+
+namespace route_keys {
+inline constexpr const char* route   = "route";
+inline constexpr const char* balance = "filterBalance";
+}
 
 // --- Wavetable oscillator (Oscillator0..2 = A/B/C) ---------------------------------------------------
 namespace osc_keys {
@@ -85,13 +104,15 @@ public:
         float         warp1Amount;
         dsp::WarpMode warp2;
         float         warp2Amount;
+        Route route;
+        float filterBalance;  // 0 = Filter 1, 1 = Filter 2
     };
     static constexpr float kPhaseMem = 0.999f;
 
     struct Indices {
         int enabled, level, pan, octave, semi, fine, coarse, wtPos, wtSmooth, phase, random, unison, uniDetune,
             uniBlend, uniWidth, uniRange, uniStack, uniMode, uniSpan, uniRandStart, uniWarp, warp1Mode,
-            warp1Amount, warp2Mode, warp2Amount;
+            warp1Amount, warp2Mode, warp2Amount, route, balance;
     };
 
     OscillatorModule(std::shared_ptr<ConfigManager> config, int index, ModTargets& targets);
@@ -126,6 +147,8 @@ public:
         float pan;
         bool  keytrack;     // playback rate follows the note (relative to C4)
         float pitchSemis;   // playback-rate offset
+        Route route;
+        float filterBalance;
     };
 
     NoiseModule(std::shared_ptr<ConfigManager> config, ModTargets& targets);
@@ -134,7 +157,7 @@ public:
 
 private:
     std::unique_ptr<ParamRegistry> m_registry;
-    int m_enabled, m_type, m_level, m_pan, m_keytrack, m_pitch;
+    int m_enabled, m_type, m_level, m_pan, m_keytrack, m_pitch, m_route, m_balance;
 };
 
 // --- Sub oscillator (Oscillator4, Serum's "SubOsc4") -------------------------------------------------
@@ -156,6 +179,8 @@ public:
         float pitchSemis;
         float level;
         float pan;
+        Route route;
+        float filterBalance;
     };
 
     SubOscModule(std::shared_ptr<ConfigManager> config, ModTargets& targets);
@@ -164,22 +189,36 @@ public:
 
 private:
     std::unique_ptr<ParamRegistry> m_registry;
-    int m_enabled, m_shape, m_octave, m_level, m_pan;
+    int m_enabled, m_shape, m_octave, m_level, m_pan, m_route, m_balance;
 };
 
 // --- Filter (Filter0..1) -----------------------------------------------------------------------------
 namespace filter_keys {
 inline constexpr const char* enabled   = "enabled";
+inline constexpr const char* type      = "type";
 inline constexpr const char* cutoff    = "cutoff";
 inline constexpr const char* resonance = "resonance";
+inline constexpr const char* drive     = "drive";
+inline constexpr const char* clean     = "clean";
+inline constexpr const char* var       = "var";
+inline constexpr const char* x         = "x";
+inline constexpr const char* y         = "y";
+inline constexpr const char* stereo    = "stereo";
+inline constexpr const char* mix       = "mix";
+inline constexpr const char* level     = "level";
+inline constexpr const char* keytrack  = "keytrack";
+inline constexpr const char* output    = "output";
 }
 
 class FilterModule {
 public:
+    static constexpr int kCount = 2;
+
     struct Values {
-        bool  enabled;
-        float cutoffHz;
-        float resonance;   // 0..1
+        bool  enabled;               // disabled = bypass (the routed signal passes through unfiltered)
+        dsp::FilterSettings settings;
+        float keytrack;              // 0..1: octaves of cutoff per octave of note, from C4
+        FilterOutput output;
     };
 
     FilterModule(std::shared_ptr<ConfigManager> config, int index, ModTargets& targets);
@@ -189,7 +228,20 @@ public:
 
 private:
     std::unique_ptr<ParamRegistry> m_registry;
-    int m_enabled, m_cutoff, m_resonance;
+    int m_enabled, m_type, m_cutoff, m_resonance, m_drive, m_clean, m_var, m_x, m_y, m_stereo, m_mix, m_level,
+        m_keytrack, m_output;
+};
+
+// --- Filter routing ("Routing") ----------------------------------------------------------------------
+class RoutingModule {
+public:
+    RoutingModule(std::shared_ptr<ConfigManager> config, ModTargets& targets);
+    FilterRouting read(const float* v) const noexcept;
+    ParamRegistry& registry() noexcept { return *m_registry; }
+
+private:
+    std::unique_ptr<ParamRegistry> m_registry;
+    int m_filterRouting;
 };
 
 // --- Envelope (Env0..3; Env0 drives amplitude) -------------------------------------------------------
