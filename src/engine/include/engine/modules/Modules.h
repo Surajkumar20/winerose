@@ -45,6 +45,8 @@ inline constexpr const char* kFilterRoutingNames[] = {"Serial", "Parallel"};
 namespace route_keys {
 inline constexpr const char* route   = "route";
 inline constexpr const char* balance = "filterBalance";
+inline constexpr const char* bus1    = "bus1Send";
+inline constexpr const char* bus2    = "bus2Send";
 }
 
 // --- Wavetable oscillator (Oscillator0..2 = A/B/C) ---------------------------------------------------
@@ -106,13 +108,14 @@ public:
         float         warp2Amount;
         Route route;
         float filterBalance;  // 0 = Filter 1, 1 = Filter 2
+        float bus1Send, bus2Send;
     };
     static constexpr float kPhaseMem = 0.999f;
 
     struct Indices {
         int enabled, level, pan, octave, semi, fine, coarse, wtPos, wtSmooth, phase, random, unison, uniDetune,
             uniBlend, uniWidth, uniRange, uniStack, uniMode, uniSpan, uniRandStart, uniWarp, warp1Mode,
-            warp1Amount, warp2Mode, warp2Amount, route, balance;
+            warp1Amount, warp2Mode, warp2Amount, route, balance, bus1, bus2;
     };
 
     OscillatorModule(std::shared_ptr<ConfigManager> config, int index, ModTargets& targets);
@@ -149,6 +152,7 @@ public:
         float pitchSemis;   // playback-rate offset
         Route route;
         float filterBalance;
+        float bus1Send, bus2Send;
     };
 
     NoiseModule(std::shared_ptr<ConfigManager> config, ModTargets& targets);
@@ -157,7 +161,7 @@ public:
 
 private:
     std::unique_ptr<ParamRegistry> m_registry;
-    int m_enabled, m_type, m_level, m_pan, m_keytrack, m_pitch, m_route, m_balance;
+    int m_enabled, m_type, m_level, m_pan, m_keytrack, m_pitch, m_route, m_balance, m_bus1, m_bus2;
 };
 
 // --- Sub oscillator (Oscillator4, Serum's "SubOsc4") -------------------------------------------------
@@ -181,6 +185,7 @@ public:
         float pan;
         Route route;
         float filterBalance;
+        float bus1Send, bus2Send;
     };
 
     SubOscModule(std::shared_ptr<ConfigManager> config, ModTargets& targets);
@@ -189,7 +194,7 @@ public:
 
 private:
     std::unique_ptr<ParamRegistry> m_registry;
-    int m_enabled, m_shape, m_octave, m_level, m_pan, m_route, m_balance;
+    int m_enabled, m_shape, m_octave, m_level, m_pan, m_route, m_balance, m_bus1, m_bus2;
 };
 
 // --- Filter (Filter0..1) -----------------------------------------------------------------------------

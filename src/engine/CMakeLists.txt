@@ -11,6 +11,13 @@ add_library(winerose_engine STATIC
     src/modulation/ModTargets.cpp
     src/modulation/Lfo.cpp
     src/modules/EngineModules.cpp
+    src/modules/FxModules.cpp
+    src/fx/EffectRegistry.cpp
+    src/fx/EffectsBasic.cpp
+    src/fx/EffectsTime.cpp
+    src/fx/EffectsReverb.cpp
+    src/fx/EffectsConvolve.cpp
+    src/fx/FxRack.cpp
     src/modules/Modules.cpp
     src/voice/Voice.cpp
     src/voice/VoiceManager.cpp)

@@ -60,6 +60,13 @@ Engine::Engine(std::shared_ptr<ConfigManager> config)
     m_bendUp       = m_global->handle(global_keys::bendUp);
     m_bendDown     = m_global->handle(global_keys::bendDown);
 
+    for (int r = 0; r < fx::kRackCount; ++r)
+        for (int s = 0; s < fx::kSlotsPerRack; ++s)
+            m_fxSlots[static_cast<std::size_t>(r * fx::kSlotsPerRack + s)] = std::make_unique<modules::FxSlotModule>(m_config, r, s);
+    m_mixer = std::make_unique<modules::MixerModule>(m_config);
+    m_config->addListener(this);
+    syncFx();
+
     m_noSlots.fill(-1);
     const auto basic = dsp::makeBasicShapesTable();
     m_oscTables   = {basic, basic, basic};
@@ -69,7 +76,33 @@ Engine::Engine(std::shared_ptr<ConfigManager> config)
     publishSnapshot();
 }
 
-Engine::~Engine() = default;
+Engine::~Engine()
+{
+    m_config->removeListener(this);
+}
+
+void Engine::syncFx()
+{
+    for (int r = 0; r < fx::kRackCount; ++r) {
+        auto& rack = m_racks[static_cast<std::size_t>(r)];
+        for (int s = 0; s < fx::kSlotsPerRack; ++s) {
+            const fx::FxType type = m_fxSlots[static_cast<std::size_t>(r * fx::kSlotsPerRack + s)]->type();
+            if (type != rack.publishedType(s)) rack.setSlotType(s, type, m_sampleRate);
+        }
+        rack.collectGarbage();
+    }
+}
+
+void Engine::onParamChanged(const std::string& key)
+{
+    // Only slot types are structural; everything else is read through handles at control rate.
+    if (key.rfind("FXRack", 0) == 0 && key.size() > 5 && key.compare(key.size() - 5, 5, ".type") == 0) syncFx();
+}
+
+void Engine::onBatchEnd()
+{
+    syncFx();
+}
 
 void Engine::prepare(double sampleRate, int maxBlockSize)
 {
@@ -82,6 +115,7 @@ void Engine::prepare(double sampleRate, int maxBlockSize)
     m_pitchBendRaw = 0.0f;
     m_context = voice::ControlContext{};
     m_context.sampleRate = sampleRate;
+    for (auto& rack : m_racks) rack.prepare(sampleRate);   // re-prepares effects for this rate
     adoptSnapshot();   // safe: the audio thread isn't running during prepare()
     controlTick();
     m_snapshots.collectGarbage();
@@ -116,6 +150,16 @@ void Engine::controlTick() noexcept
     m_polyphonyLimit = static_cast<int>(std::lround(m_polyphony.load()));
     m_masterGain.setTarget(m_masterVolume.load());
     m_voices.control(ctx);
+
+    const fx::FxContext fxContext {ctx.global.bpm};
+    for (int r = 0; r < fx::kRackCount; ++r) {
+        auto& params = m_rackParams[static_cast<std::size_t>(r)];
+        for (int s = 0; s < fx::kSlotsPerRack; ++s)
+            params[static_cast<std::size_t>(s)] = m_fxSlots[static_cast<std::size_t>(r * fx::kSlotsPerRack + s)]->read();
+        m_racks[static_cast<std::size_t>(r)].setParams(params, fxContext);
+        m_rackActive[static_cast<std::size_t>(r)] = m_racks[static_cast<std::size_t>(r)].active();
+    }
+    m_mixLevels = m_mixer->read();
 }
 
 void Engine::adoptSnapshot() noexcept
@@ -123,6 +167,7 @@ void Engine::adoptSnapshot() noexcept
     // Everything voices read from the snapshot is re-pointed as soon as it is adopted: once acquire()
     // swaps snapshots, the previous one may be freed by the message thread at any moment.
     m_current = m_snapshots.acquire();
+    for (auto& rack : m_racks) rack.beginBlock();
     auto& ctx = m_context;
     ctx.slotDest = m_current != nullptr ? &m_current->slotDest : &m_noSlots;
     ctx.tables = voice::VoiceTables{};
@@ -196,6 +241,9 @@ void Engine::process(float* const* out, int numChannels, int numSamples,
     float peakL = 0.0f, peakR = 0.0f;
     float left[voice::kControlBlock], right[voice::kControlBlock];
     float directL[voice::kControlBlock], directR[voice::kControlBlock];
+    float bus1L[voice::kControlBlock], bus1R[voice::kControlBlock];
+    float bus2L[voice::kControlBlock], bus2R[voice::kControlBlock];
+    const voice::VoiceOutputs outputs {left, right, directL, directR, bus1L, bus1R, bus2L, bus2R};
     int pos = 0, ev = 0;
 
     while (pos < numSamples || ev < numEvents) {
@@ -208,15 +256,17 @@ void Engine::process(float* const* out, int numChannels, int numSamples,
         if (ev < numEvents) end = std::min(end, std::max(pos + 1, events[ev].sampleOffset));
         const int n = end - pos;
 
-        std::memset(left, 0, sizeof(float) * static_cast<std::size_t>(n));
-        std::memset(right, 0, sizeof(float) * static_cast<std::size_t>(n));
-        std::memset(directL, 0, sizeof(float) * static_cast<std::size_t>(n));
-        std::memset(directR, 0, sizeof(float) * static_cast<std::size_t>(n));
-        m_voices.render(left, right, directL, directR, n, tables);
-        // Main is where the FX rack goes (Phase 5); Direct bypasses it.
+        const std::size_t bytes = sizeof(float) * static_cast<std::size_t>(n);
+        for (float* b : {left, right, directL, directR, bus1L, bus1R, bus2L, bus2R}) std::memset(b, 0, bytes);
+        m_voices.render(outputs, n, tables);
+
+        // FX racks on Main and the two buses (in that order), then the mix: Main + Bus 1/2 + Direct.
+        if (m_rackActive[0]) m_racks[0].process(left, right, n);
+        if (m_rackActive[1]) m_racks[1].process(bus1L, bus1R, n);
+        if (m_rackActive[2]) m_racks[2].process(bus2L, bus2R, n);
         for (int i = 0; i < n; ++i) {
-            left[i]  += directL[i];
-            right[i] += directR[i];
+            left[i]  += bus1L[i] * m_mixLevels.bus1 + bus2L[i] * m_mixLevels.bus2 + directL[i] * m_mixLevels.direct;
+            right[i] += bus1R[i] * m_mixLevels.bus1 + bus2R[i] * m_mixLevels.bus2 + directR[i] * m_mixLevels.direct;
         }
         advanceFreeLfos(n);
 

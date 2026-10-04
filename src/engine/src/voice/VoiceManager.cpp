@@ -96,11 +96,10 @@ void VoiceManager::control(const ControlContext& ctx) noexcept
         if (v.active()) v.control(ctx);
 }
 
-void VoiceManager::render(float* mainL, float* mainR, float* directL, float* directR, int numSamples,
-                          const VoiceTables& tables) noexcept
+void VoiceManager::render(const VoiceOutputs& out, int numSamples, const VoiceTables& tables) noexcept
 {
     for (auto& v : m_voices)
-        if (v.active()) v.render(mainL, mainR, directL, directR, numSamples, tables);
+        if (v.active()) v.render(out, numSamples, tables);
 }
 
 int VoiceManager::activeCount() const noexcept

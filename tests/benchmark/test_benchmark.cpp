@@ -4,6 +4,7 @@
 
 #include "engine/Engine.h"
 #include "engine/dsp/Warp.h"
+#include "engine/fx/Effect.h"
 #include "engine/dsp/WavetableBank.h"
 
 #include <catch2/catch_test_macros.hpp>
@@ -33,6 +34,7 @@ struct Scenario {
     int   warp;      // dsp::WarpMode
     int   quality;   // 0 Good, 1 High, 2 Ultra
     bool  filter;
+    bool  fx = false;  // Main rack: distortion, chorus, delay, reverb
 };
 
 // Returns the fraction of one core used to render in realtime.
@@ -53,6 +55,16 @@ double measureLoad(const Scenario& sc, double seconds)
     cm->findParamRegistry("Global")->set("quality", sc.quality);
     cm->findParamRegistry("Filter0")->set("enabled", sc.filter);
     cm->findParamRegistry("Env0")->set("sustain", 1.0f);
+    if (sc.fx) {
+        const fx::FxType chain[] = {fx::FxType::Distortion, fx::FxType::Chorus, fx::FxType::Delay, fx::FxType::Reverb};
+        for (int s = 0; s < 4; ++s) {
+            auto& r = *cm->findParamRegistry("FXRack0Slot" + std::to_string(s));
+            const auto& d = fx::defaultParams(chain[s]);
+            for (int i = 0; i < fx::kParamCount; ++i) r.set("p" + std::to_string(i), d[static_cast<std::size_t>(i)]);
+            r.set("type", static_cast<int>(chain[s]));
+            r.set("enabled", true);
+        }
+    }
     engine.prepare(kRate, kBlock);
 
     std::vector<float> l(kBlock), r(kBlock);
@@ -79,6 +91,7 @@ TEST_CASE("Phase 2 CPU budget: 16 voices x 3 osc x 7 unison", "[benchmark]")
         {"  + Sync warp, Good", 7, static_cast<int>(dsp::WarpMode::Sync), 0, true},
         {"  + Sync warp, Ultra (4x)", 7, static_cast<int>(dsp::WarpMode::Sync), 2, true},
         {"16 voices x 3 osc x 16 unison", 16, 0, 0, true},
+        {"acceptance + Main FX (dist/chorus/delay/reverb)", 7, 0, 0, true, true},
     };
 #ifdef NDEBUG
     constexpr double kSeconds = 4.0;

@@ -42,6 +42,14 @@ struct GlobalModState {
     double bpm        = 120.0;
 };
 
+/** The six stereo buses a voice renders into (Main → FX Main; Bus 1/2 → FX buses; Direct → output). */
+struct VoiceOutputs {
+    float* mainL; float* mainR;
+    float* directL; float* directR;
+    float* bus1L; float* bus1R;
+    float* bus2L; float* bus2R;
+};
+
 /** What the Engine hands every voice at each control tick. */
 struct ControlContext {
     const float* base = nullptr;                          // every ModTargets value, unmodulated
@@ -84,9 +92,8 @@ public:
     /** Control tick: evaluate modulation, rebuild settings, recompute layout. */
     void control(const ControlContext& ctx) noexcept;
 
-    /** Adds into the Main (→ FX) and Direct (→ output) buses (numSamples <= kControlBlock). */
-    void render(float* mainL, float* mainR, float* directL, float* directR, int numSamples,
-                const VoiceTables& tables) noexcept;
+    /** Adds into the output buses (numSamples <= kControlBlock). */
+    void render(const VoiceOutputs& out, int numSamples, const VoiceTables& tables) noexcept;
 
     bool          active() const noexcept { return m_env[0].isActive(); }
     bool          released() const noexcept { return m_released; }
@@ -154,12 +161,12 @@ private:
     LinearSmoother m_noiseLevel;
 
     // Routing: per source (osc A/B/C, noise, sub) the weight it sends to each bus.
-    enum Bus { kBusF1 = 0, kBusF2, kBusMain, kBusDirect, kBusCount };
+    enum Bus { kBusF1 = 0, kBusF2, kBusMain, kBusDirect, kBusB1, kBusB2, kBusCount };
     static constexpr int kSourceCount = kOscCount + 2;   // osc 0..2, noise, sub
     static constexpr int kNoiseSource = kOscCount, kSubSource = kOscCount + 1;
     // Each source feeds at most two buses (a filter balance); bypassed filters are folded into the
     // routing at control rate, so their buses only exist while the filter is actually running.
-    struct Send { int bus[2] = {kBusMain, kBusMain}; float gain[2] = {0.0f, 0.0f}; int count = 0; };
+    struct Send { int bus[4] = {kBusMain, kBusMain, kBusMain, kBusMain}; float gain[4] = {}; int count = 0; };
     std::array<Send, kSourceCount> m_sends {};
     std::array<bool, kBusCount> m_busUsed {};
 

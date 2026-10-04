@@ -426,6 +426,15 @@ void Voice::layout(const VoiceControl& control) noexcept
             m_busUsed[static_cast<std::size_t>(bus)] = true;
         };
         const auto [route, balance] = routeOf(src);
+        // FX bus sends (pre-filter; the amp envelope applies to every bus).
+        const float b1 = src < kOscCount ? control.osc[static_cast<std::size_t>(src)].bus1Send
+                       : (src == kNoiseSource ? control.noise.bus1Send : control.sub.bus1Send);
+        const float b2 = src < kOscCount ? control.osc[static_cast<std::size_t>(src)].bus2Send
+                       : (src == kNoiseSource ? control.noise.bus2Send : control.sub.bus2Send);
+        if (route != modules::Route::None) {
+            add(kBusB1, b1);
+            add(kBusB2, b2);
+        }
         switch (route) {
             case modules::Route::Filter: {
                 const float b = std::clamp(balance, 0.0f, 1.0f);
@@ -456,8 +465,7 @@ void Voice::layout(const VoiceControl& control) noexcept
 
 // --- Audio --------------------------------------------------------------------------------------------
 
-void Voice::render(float* mainL, float* mainR, float* directL, float* directR, int numSamples,
-                   const VoiceTables& tables) noexcept
+void Voice::render(const VoiceOutputs& out, int numSamples, const VoiceTables& tables) noexcept
 {
     if (!m_env[0].isActive()) return;
 
@@ -712,10 +720,18 @@ void Voice::render(float* mainL, float* mainR, float* directL, float* directR, i
 
         const float amp = m_env[0].next();
         for (int e = 1; e < modulation::kEnvCount; ++e) m_env[static_cast<std::size_t>(e)].next();
-        mainL[i]   += outMain[0] * amp;
-        mainR[i]   += outMain[1] * amp;
-        directL[i] += outDirect[0] * amp;
-        directR[i] += outDirect[1] * amp;
+        out.mainL[i]   += outMain[0] * amp;
+        out.mainR[i]   += outMain[1] * amp;
+        out.directL[i] += outDirect[0] * amp;
+        out.directR[i] += outDirect[1] * amp;
+        if (m_busUsed[kBusB1]) {
+            out.bus1L[i] += buf[kBusB1][0][i] * amp;
+            out.bus1R[i] += buf[kBusB1][1][i] * amp;
+        }
+        if (m_busUsed[kBusB2]) {
+            out.bus2L[i] += buf[kBusB2][0][i] * amp;
+            out.bus2R[i] += buf[kBusB2][1][i] * amp;
+        }
     }
 
     // Control-rate LFOs advance in one step per chunk; audio-rate ones were ticked per sample above.

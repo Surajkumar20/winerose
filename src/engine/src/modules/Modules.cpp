@@ -48,6 +48,8 @@ void registerRouting(ParamRegistry& r, Route defaultRoute, const std::string& gr
     r.registerEnum (route_keys::route, choices(kRouteNames), static_cast<int>(defaultRoute), group,
                     "Signal destination: Filter (see balance), Main (through FX), Direct (bypass filters/FX), None");
     r.registerFloat(route_keys::balance, 0.0f, 0.0f, 1.0f, group, "Filter balance: 0 = Filter 1, 1 = Filter 2");
+    r.registerFloat(route_keys::bus1, 0.0f, 0.0f, 1.0f, group, "Send to FX Bus 1 (pre-filter, post amp envelope)");
+    r.registerFloat(route_keys::bus2, 0.0f, 0.0f, 1.0f, group, "Send to FX Bus 2 (pre-filter, post amp envelope)");
 }
 
 } // namespace
@@ -107,6 +109,8 @@ OscillatorModule::OscillatorModule(std::shared_ptr<ConfigManager> config, int in
     m_i.warp2Amount = t.add(r, osc_keys::warp2Amount);
     m_i.route = t.add(r, route_keys::route);
     m_i.balance = t.add(r, route_keys::balance);
+    m_i.bus1 = t.add(r, route_keys::bus1);
+    m_i.bus2 = t.add(r, route_keys::bus2);
 }
 
 OscillatorModule::Values OscillatorModule::read(const float* v) const noexcept
@@ -136,6 +140,8 @@ OscillatorModule::Values OscillatorModule::read(const float* v) const noexcept
     o.warp2Amount  = v[m_i.warp2Amount];
     o.route        = asEnum(v[m_i.route], Route::Count);
     o.filterBalance = v[m_i.balance];
+    o.bus1Send     = v[m_i.bus1];
+    o.bus2Send     = v[m_i.bus2];
     return o;
 }
 
@@ -162,12 +168,13 @@ NoiseModule::NoiseModule(std::shared_ptr<ConfigManager> config, ModTargets& t)
     m_level = t.add(r, noise_keys::level);       m_pan = t.add(r, noise_keys::pan);
     m_keytrack = t.add(r, noise_keys::keytrack); m_pitch = t.add(r, noise_keys::pitch);
     m_route = t.add(r, route_keys::route);       m_balance = t.add(r, route_keys::balance);
+    m_bus1 = t.add(r, route_keys::bus1);         m_bus2 = t.add(r, route_keys::bus2);
 }
 
 NoiseModule::Values NoiseModule::read(const float* v) const noexcept
 {
     return Values{asBool(v[m_enabled]), asEnum(v[m_type], dsp::NoiseTables::Type::Count), v[m_level], v[m_pan],
-                  asBool(v[m_keytrack]), v[m_pitch], asEnum(v[m_route], Route::Count), v[m_balance]};
+                  asBool(v[m_keytrack]), v[m_pitch], asEnum(v[m_route], Route::Count), v[m_balance], v[m_bus1], v[m_bus2]};
 }
 
 // --- Sub ---------------------------------------------------------------------------------------------
@@ -187,12 +194,13 @@ SubOscModule::SubOscModule(std::shared_ptr<ConfigManager> config, ModTargets& t)
     m_octave = t.add(r, sub_keys::octave);    m_level = t.add(r, sub_keys::level);
     m_pan = t.add(r, sub_keys::pan);
     m_route = t.add(r, route_keys::route);    m_balance = t.add(r, route_keys::balance);
+    m_bus1 = t.add(r, route_keys::bus1);      m_bus2 = t.add(r, route_keys::bus2);
 }
 
 SubOscModule::Values SubOscModule::read(const float* v) const noexcept
 {
     return Values{asBool(v[m_enabled]), asEnum(v[m_shape], dsp::SubShape::Count), v[m_octave] * 12.0f, v[m_level], v[m_pan],
-                  asEnum(v[m_route], Route::Count), v[m_balance]};
+                  asEnum(v[m_route], Route::Count), v[m_balance], v[m_bus1], v[m_bus2]};
 }
 
 // --- Filter ------------------------------------------------------------------------------------------

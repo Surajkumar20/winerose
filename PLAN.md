@@ -517,3 +517,56 @@ Where the code differs from, or adds detail to, the sections above:
   Run-to-run noise is about ±1%.
 - **Next levers if needed:** AVX2 gathers (needs a runtime CPU dispatch), and a struct-of-arrays unison
   layout.
+
+### Phase 5 (SPEC §5.4): done
+
+- **Racks:** three, Main / Bus 1 / Bus 2 (Serum 2's FXRack0..2), each with 8 slots (`FXRack<r>Slot<s>`).
+  - Slot fields: type (patch state, not automatable), enabled, mix, and p0..p7 (generic 0..1 knobs, as in
+    Serum 2's generic "FX Params"; meanings per type in `fx::paramNames()`).
+  - Effects are created on the message thread when a slot's type changes (the Engine listens on its
+    ConfigManager) and handed over through `ObjectExchange<Effect>` (lock-free, retired objects deleted on the
+    message thread). The audio thread never allocates.
+- **Effects** (our list; Serum's mapped by compat):
+  - Distortion: 8 modes, 4× oversampled, pre/post filter, DC bias.
+  - Flanger, Phaser (2–12 stages), Chorus (4 voices).
+  - Delay: normal / ping-pong / tap, free or tempo-synced, band-pass feedback filter, time glide.
+  - Compressor: soft knee, stereo-linked, limiter at the top of the ratio.
+  - Multiband: OTT-style, 3 bands at 88 Hz / 2.5 kHz, upward + downward.
+  - Reverb: Plate = Dattorro tank; Hall = 8-line Hadamard FDN.
+  - EQ: 2 RBJ bands. Filter: any FilterType. Hyper/Dimension. Bode shifter (HIIR Hilbert pair).
+  - Convolve: zero-latency, 64 direct taps plus 64/256 uniform-partitioned FFT stages; built-in decaying-noise
+    IR until IR loading arrives with presets.
+  - Utility: gain, pan, width, invert, swap, bass mono.
+- **Splitters** (low/high, low/mid/high, mid/side) use Linkwitz-Riley 4th-order crossovers, and the low band is
+  allpass-aligned in 3-band mode. Band k runs through slot `splitter + 1 + k`; bands are summed or M/S-decoded,
+  with per-band levels.
+- **Routing:** every source has `bus1Send` / `bus2Send` (pre-filter, post amp envelope; off when the route is
+  None). `Mixer` sets `directLevel`, `bus1Level` and `bus2Level`. Output = Main rack + Bus 1 rack · level +
+  Bus 2 rack · level + Direct · level.
+- **Acceptance:**
+  - Null tests: EQ (shelves and peaks at 0 dB), utility at neutral and the compressor below threshold give a
+    residual of exactly 0.
+  - Reverb RT60 (T20, broadband, size 0.5):
+
+    | Mode | 0.6 s | 1.5 s | 4 s |
+    |---|---|---|---|
+    | Hall | 0.594 | 1.490 | 3.995 |
+    | Plate | 0.608 | 1.615 | 4.139 |
+
+  - Two Plate fixes were needed to get there: first-order allpass interpolation on the modulated tank taps (no
+    per-trip loss), and diffusion coefficients capped so the allpasses' own ringing stays under half the target
+    decay. Without the cap there was a fixed ~0.4 s floor.
+  - **Known limit:** at maximum size with decays shorter than about 0.7 s, one trip around the plate's tank takes
+    longer than the decay, so the decay arrives as discrete steps.
+- **Also verified:** convolution equals the IR to 5e-9 with zero latency; Bode +200 Hz with the image 51 dB
+  down; delay echoes sample-accurate, ping-pong alternating; splitter sums flat to 0.05 dB; FX output identical
+  for host block sizes 1…512; every effect stays finite under fuzzing.
+- **CPU:** acceptance 23–24% (criterion < 25%; the six-bus routing costs about 1.5%). The Main FX chain adds
+  5–10%. **The margin is thin again: AVX2 gathers with runtime dispatch, or a struct-of-arrays unison layout, are
+  the next levers.**
+- **Not yet:**
+  - FX parameter modulation (FX are global, while the matrix is per voice; needs a global matrix pass).
+  - User IRs for Convolve (feature/presets).
+  - Per-type parameter names in the generic editor (`fx::paramNames()` exists for feature/UI).
+  - Resetting p0..p7 to the type's defaults when a user picks a new type. That is UI policy: the engine must not
+    do it, or preset loads would be overwritten.

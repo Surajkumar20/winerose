@@ -4,11 +4,14 @@
 #include "engine/Smoother.h"
 #include "engine/dsp/Curve.h"
 #include "engine/dsp/WavetableBank.h"
+#include "engine/fx/FxRack.h"
 #include "engine/modules/EngineModules.h"
+#include "engine/modules/FxModules.h"
 #include "engine/voice/VoiceManager.h"
 
 #include "params/ConfigManager.h"
 #include "params/ParamHandle.h"
+#include "params/ParamListener.h"
 #include "params/ParamRegistry.h"
 #include "params/SnapshotExchange.h"
 
@@ -49,15 +52,18 @@ struct EngineSnapshot {
  * @class Engine
  * @brief The synth. JUCE-free; driven through POD types by whichever host adapter owns it (PLAN.md §1.3).
  *
- * Phases 1-3 (SPEC §5.4): oscillators A/B/C (unison, dual warp), noise, sub, Filter0, four envelopes
- * (Env0 = amplitude), ten LFOs, eight macros and the 64-slot mod matrix, 64-voice pool, Quality
- * oversampling, pitch bend.
+ * Phases 1-5 (SPEC §5.4): oscillators A/B/C (unison, dual warp), noise, sub, two filters with
+ * Serum-style routing, four envelopes (Env0 = amplitude), ten LFOs, eight macros, the 64-slot mod matrix,
+ * 64-voice pool, Quality oversampling, pitch bend, and three FX racks (Main, Bus 1, Bus 2; 8 slots each).
+ *
+ * FX effects are built on the message thread when a slot's type changes (the Engine listens on its
+ * ConfigManager) and handed to the audio thread lock-free.
  *
  * Block-size independence: process() splits the host block into chunks that end at MIDI events and at
  * every kControlBlock-sample boundary of the ABSOLUTE sample count. Parameters are read and modulation
  * evaluated only on those boundaries, so the output is identical whatever block sizes the host uses.
  */
-class Engine {
+class Engine : private IParamListener {
 public:
     explicit Engine(std::shared_ptr<ConfigManager> config);
     ~Engine();
@@ -97,12 +103,24 @@ public:
 private:
     void controlTick() noexcept;
     void handleMidi(const MidiEvent& e) noexcept;
+    void syncFx();   // message thread: (re)build effects whose slot type changed
+
+    // IParamListener (message thread)
+    void onParamChanged(const std::string& namespacedKey) override;
+    void onBatchEnd() override;
     void advanceFreeLfos(int numSamples) noexcept;
     void adoptSnapshot() noexcept;
 
     std::shared_ptr<ConfigManager>          m_config;
     std::unique_ptr<ParamRegistry>          m_global;
     std::unique_ptr<modules::EngineModules> m_modules;
+
+    std::array<std::unique_ptr<modules::FxSlotModule>, fx::kRackCount * fx::kSlotsPerRack> m_fxSlots;
+    std::unique_ptr<modules::MixerModule> m_mixer;
+    std::array<fx::FxRack, fx::kRackCount> m_racks;
+    std::array<fx::FxRack::Params, fx::kRackCount> m_rackParams {};
+    std::array<bool, fx::kRackCount> m_rackActive {};
+    modules::MixerModule::Values m_mixLevels { 1.0f, 1.0f, 1.0f };
 
     ParamHandle    m_masterVolume, m_polyphony, m_quality, m_bendUp, m_bendDown;
     LinearSmoother m_masterGain;
