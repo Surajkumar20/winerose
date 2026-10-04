@@ -1,0 +1,188 @@
+#pragma once
+#include "configurations/ConfigManager.h"
+#include <string>
+#include <vector>
+#include <variant>
+#include <memory>
+#include <mutex>
+#include <initializer_list>
+#include <utility>
+#include <chrono>
+#include <type_traits>
+
+// Detects std::chrono::duration<Rep,Period>. Lets ParamRegistry::get/set store any
+// duration transparently as an integer millisecond count in the underlying ConfigManager
+// (which itself only knows string/int/double/float/bool) while handing plugin code a
+// typed std::chrono value back — no manual int↔chrono conversion at the call site.
+template<typename T> struct is_std_chrono_duration : std::false_type {};
+template<typename R, typename P>
+struct is_std_chrono_duration<std::chrono::duration<R, P>> : std::true_type {};
+
+struct EnumChoice {
+    int         value;
+    std::string label;
+};
+
+struct NumericMeta {
+    enum class SubType { INT, FLOAT, DOUBLE } subtype;
+    double min_val;
+    double max_val;
+};
+
+struct EnumMeta   { std::vector<EnumChoice> choices; };
+struct StringMeta {};
+
+using ParamMeta = std::variant<NumericMeta, EnumMeta, StringMeta>;
+
+struct ParamDef {
+    std::string key;            // unqualified key, e.g. "Robot.IP" — ParamRegistry namespaces it.
+                                 // Also what the UI displays — there is no separate display_name.
+    std::string group;          // CollapsingHeader section label (empty = ungrouped)
+    std::string tooltip;
+    std::string default_value;  // stringified factory default — for hydration + schema export
+    ParamMeta   meta;
+};
+
+struct ValidationError {
+    std::string key;
+    std::string message;
+};
+
+/**
+ * @class ParamRegistry
+ * @brief Per-plugin-instance registry of that instance's tunable parameters.
+ *
+ * One ParamRegistry is created and owned by each plugin instance (in IPlugin::initialize()),
+ * analogous to how each plugin already owns its own LogService. It never touches a file
+ * directly — it holds a shared_ptr<ConfigManager> (composition, not inheritance) and asks
+ * ConfigManager to (a) claim a collision-free namespace name, (b) read/write live values in
+ * app.ini, and (c) persist this instance's schema to bin/params/<name>/.
+ */
+class ParamRegistry {
+public:
+    /**
+     * @param configManager Shared ConfigManager instance — normally AppContext::instance().configmanager.
+     * @param requestedName The plugin's own logical name (e.g. "blobvizLift"). Becomes the
+     *                      namespace prefix for every key registered on this instance, AFTER
+     *                      collision resolution against other currently-live ParamRegistry
+     *                      instances in this process. Two blobvizLift instances loaded
+     *                      concurrently end up as "blobvizLift" and "blobvizLift_2".
+     */
+    ParamRegistry(std::shared_ptr<ConfigManager> configManager, const std::string& requestedName);
+
+    /**
+     * @brief Detaches from ConfigManager's live registry if not already detached.
+     */
+    ~ParamRegistry();
+
+    ParamRegistry(const ParamRegistry&) = delete;
+    ParamRegistry& operator=(const ParamRegistry&) = delete;
+
+    /** @return The collision-resolved name this instance was granted, e.g. "blobvizLift_2". */
+    const std::string& resolvedName() const { return m_resolved_name_; }
+
+    // TEMP-SDK-SHIM: expose the backing ConfigManager so bulk writers (e.g. the
+    // Maintenance pallet editor resetting 60 slot poses = 360 set<T>() calls) can
+    // wrap the storm in beginBatch()/endBatch() instead of one disk save per write.
+    std::shared_ptr<ConfigManager> configManager() const { return m_config_; }
+
+    // --- Registration ---
+    // Each of these hydrates immediately: reads the persisted value from ConfigManager
+    // (falling back to default_value if absent), writes it back so app.ini always contains
+    // the key, then records the ParamDef (with the ORIGINAL default, not the hydrated value).
+
+    // NOTE the argument order: default value first, then min, then max (min-to-max order).
+    void registerInt(const std::string& key,
+                      int default_value, int min_val, int max_val,
+                      const std::string& group = "", const std::string& tooltip = "");
+
+    void registerFloat(const std::string& key,
+                        float default_value, float min_val, float max_val,
+                        const std::string& group = "", const std::string& tooltip = "");
+
+    void registerDouble(const std::string& key,
+                         double default_value, double min_val, double max_val,
+                         const std::string& group = "", const std::string& tooltip = "");
+
+    // Stored as an integer MILLISECOND count (reuses the INT numeric meta, so the
+    // Configurator shows a plain ms slider). Read it back typed with
+    // get<std::chrono::milliseconds>(key) — or any std::chrono::duration; the stored
+    // ms value is duration_cast to the requested unit. Coarser units convert implicitly
+    // on the way in, e.g. registerDuration(k, std::chrono::seconds(2), ...).
+    void registerDuration(const std::string& key,
+                          std::chrono::milliseconds default_value,
+                          std::chrono::milliseconds min_val,
+                          std::chrono::milliseconds max_val,
+                          const std::string& group = "", const std::string& tooltip = "");
+
+    void registerString(const std::string& key,
+                         const std::string& default_value,
+                         const std::string& group = "", const std::string& tooltip = "");
+
+    void registerBool(const std::string& key,
+                       bool default_value,
+                       const std::string& group = "", const std::string& tooltip = "");
+
+    void registerEnum(const std::string& key,
+                       std::vector<EnumChoice> choices, int default_value,
+                       const std::string& group = "", const std::string& tooltip = "");
+
+    /**
+     * @brief Template wrapper for typed enums.
+     * Usage:
+     *   registry.registerEnum<MyEnum>("key",
+     *       { {MyEnum::A, "Option A"}, {MyEnum::B, "Option B"} }, MyEnum::A, "Group");
+     */
+    template<typename EnumT>
+    void registerEnum(const std::string& key,
+                       std::initializer_list<std::pair<EnumT, const char*>> choices,
+                       EnumT default_value,
+                       const std::string& group = "", const std::string& tooltip = "")
+    {
+        std::vector<EnumChoice> ec;
+        ec.reserve(choices.size());
+        for (const auto& [val, label] : choices)
+            ec.push_back({static_cast<int>(val), std::string(label)});
+        registerEnum(key, std::move(ec), static_cast<int>(default_value), group, tooltip);
+    }
+
+    // --- Live value accessors — what plugin code calls AFTER registration, INSTEAD OF
+    //     reading the SystemConstant.h constant directly. Namespaces the key internally. ---
+    template<typename T> T get(const std::string& key) const;
+    template<typename T> void set(const std::string& key, const T& value);
+
+    /**
+     * @brief Set a param's live value from a user-typed STRING (as an editor UI produces),
+     *        interpreting/clamping it according to the param's REGISTERED type, then writing
+     *        it through ConfigManager (which persists app.ini — no separate save() needed).
+     *
+     * This is the runtime-edit entry point the parameter UI calls: it takes the raw text the
+     * operator typed and does the type-aware work `set<T>()` can't (the caller only has a
+     * string, not a compile-time T). Numeric params are parsed and clamped to their [min,max];
+     * enum/bool params (stored as an int choice) accept only a valid choice value; string
+     * params are stored verbatim.
+     *
+     * @return true if the value was parsed and written; false — leaving the stored value
+     *         untouched — if @p key isn't registered here, the string can't be parsed as the
+     *         param's type, or the parsed value isn't a legal enum choice.
+     */
+    bool modify(const std::string& key, const std::string& rawValue);
+
+    // --- Query / tooling ---
+    const std::vector<ParamDef>& getAll() const;
+
+    // --- Validation ---
+    std::vector<ValidationError> validate() const;
+    bool clampAndApply(const ParamDef& def);
+
+private:
+    std::string namespacedKey(const std::string& key) const { return m_resolved_name_ + "." + key; }
+
+    std::shared_ptr<ConfigManager> m_config_;
+    std::string                    m_resolved_name_;
+    std::vector<ParamDef>          m_params_;
+    mutable std::mutex             m_mutex_;
+    bool                           m_detached_ = false;
+};
+
+#include "configurations/ParamRegistry.ipp"

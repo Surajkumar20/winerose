@@ -1,0 +1,291 @@
+Skip to:
+Top Bar
+Sidebar
+Main Content
+
+
+blobvizsdk
+
+Create
+
+
+6
+
+
+Recent
+
+
+blobvizRobots
+blobvizSDK
+blobvizSDK
+RUNTIME_PARAM_PLAN.md
+
+Pull requests
+
+
+Source
+
+feature/configuratorUI
+
+
+fbd46f5
+blobvizsdk/
+sdk/
+inc/
+configurations/
+RUNTIME_PARAM_PLAN.md
+
+BlameEdit
+
+Runtime-Reconfigurable Plugin Parameters
+Context
+Today, plugin parameters (robot IPs, speeds, Modbus addresses, PID gains, etc.) are hardcoded as constexpr/static inline values in each plugin's SystemConstant.h. Changing any of them requires editing source and recompiling the plugin. The goal of this change is to let an operator tune these values at runtime — through the existing Configurator UI or the standalone param_configurator tool — with changes surviving a crash/restart, and without recompiling anything.
+
+The existing sdk/inc/parameters/ParamRegistry.h is a bare global singleton with no persistence and no notion of "which plugin owns this param." It doesn't support multiple plugins contributing their own parameter sets, doesn't support the same plugin type being loaded more than once (e.g. two robot arms), and never talks to ConfigManager — configurator/ParamRegistrations.cpp hand-mirrors every plugin's params as a maintenance burden, and nothing in the real plugin-loaded app ever touches it.
+
+This plan replaces that singleton with a per-plugin-instance ParamRegistry that composes with (never inherits from) the single ConfigManager, so ConfigManager remains the only class that ever touches a file on disk — both the live app.ini values and a new per-plugin-instance schema file under bin/params/<name>/ that lets tooling discover a plugin's tunables without loading it.
+
+Scope of this change: the ConfigManager/ParamRegistry/PluginContext infrastructure, plus ONE illustrative registration inside blobvizLiftPlugin (Robot.IP/Robot.Port) proving the pattern end-to-end. Migrating blobvizLift's remaining ~40 SystemConstant.h values and their call sites (FSM.cpp, nonVisAirCompTest.cpp, etc.) is an explicit follow-up, not part of this change.
+
+Design decisions already settled
+ConfigManager is the only class that ever opens a file. ParamRegistry never does I/O — it holds a std::shared_ptr<ConfigManager> and asks it to read/write/persist everything.
+ParamRegistry is per-plugin-instance (owned by the plugin, like its LogService), not a global singleton. New location: sdk/inc/configurations/ParamRegistry.h / sdk/src/configurations/ParamRegistry.cpp, alongside ConfigManager. The old sdk/inc|src/parameters/* files are deleted.
+A ParamRegistry's constructor claims a collision-free namespace name from ConfigManager immediately (e.g. two "blobvizLift" instances resolve to "blobvizLift" and "blobvizLift_2") — this must happen before any key is registered, since the resolved name prefixes every key.
+ConfigManager::set<T>() becomes write-through: it persists to app.ini immediately instead of requiring an explicit save() call, creating the file if it doesn't exist yet.
+Every registered param is hydrated at registration time: ConfigManager::get<T>(namespacedKey, default) (default = the SystemConstant.h value) resolves the live value, which is immediately written back via set<T> so app.ini always contains every known key even on first run.
+bin/params/<resolvedName>/schema.ini (CWD-relative, same convention as ./app.ini) stores that instance's parameter schema (key/type/range/default) — written by ConfigManager, never by ParamRegistry directly. Rewritten every time that plugin instance initializes.
+ConfigManager already gets constructed first in Application::init() (sdk/src/core/Application.cpp:264-265), before window/services/plugin loading — no change needed there. Plugins (and their ParamRegistrys) are constructed later during initPlugins() (Application.cpp:273), which is already after ConfigManager exists.
+validate()/clampAndApply() are carried over onto the new ParamRegistry for parity with the old design and because the standalone configurator's "Validate" button depends on them.
+Correction found during implementation: PluginContext methods cannot call AppContext::instance() directly — AppContext.h includes plugin/PluginManager.h, which includes plugin/PluginAPI.h (where PluginContext lives), so including AppContext.h back from PluginAPI.h would be circular. Instead PluginContext gets a raw ConfigManager* m_configManager_ member, populated by PluginManager::populateContext() exactly like the existing m_viewFactory_/m_serviceFactory_/etc. raw pointers. Plugin .cpp files (leaf translation units, not part of the cycle) still call AppContext::instance().configmanager directly to construct their ParamRegistry.
+1. New ParamRegistry — sdk/inc/configurations/ParamRegistry.h / sdk/src/configurations/ParamRegistry.cpp
+Fold ParamDef.h's contents (EnumChoice, NumericMeta, EnumMeta, StringMeta, ParamMeta, ParamDef, ValidationError) directly into the top of the new header — they have no independent existence apart from ParamRegistry, and one header lowers the include surface for plugin authors. Add a default_value (stringified) field to ParamDef — needed for hydration fallback and for the schema file to advertise a factory default independent of whatever's currently live in app.ini.
+
+class ParamRegistry {
+public:
+    // Constructor claims the namespace immediately: m_resolved_name_ = configManager->attachParamRegistry(requestedName, this);
+    ParamRegistry(std::shared_ptr<ConfigManager> configManager, const std::string& requestedName);
+    ~ParamRegistry(); // detaches from ConfigManager's live registry if not already detached
+
+    ParamRegistry(const ParamRegistry&) = delete;
+    ParamRegistry& operator=(const ParamRegistry&) = delete;
+
+    const std::string& resolvedName() const;
+
+    // Registration — mirrors the old singleton's shape, plus an explicit default_value.
+    // Each of these internally: builds namespacedKey = resolvedName + "." + key, calls
+    // m_config_->get<T>(namespacedKey, default_value), writes that value back via
+    // m_config_->set<T>(namespacedKey, ...), then records the ParamDef (with the ORIGINAL default,
+    // not the possibly-already-diverged live value).
+    void registerInt(const std::string& key, const std::string& display_name, int min_val, int max_val,
+                      int default_value, const std::string& group = "", const std::string& tooltip = "");
+    void registerFloat(...);   // same shape, float
+    void registerDouble(...);  // same shape, double
+    void registerString(const std::string& key, const std::string& display_name,
+                         const std::string& default_value, const std::string& group = "", const std::string& tooltip = "");
+    void registerBool(const std::string& key, const std::string& display_name, bool default_value,
+                       const std::string& group = "", const std::string& tooltip = "");
+    void registerEnum(const std::string& key, const std::string& display_name,
+                       std::vector<EnumChoice> choices, int default_value,
+                       const std::string& group = "", const std::string& tooltip = "");
+    template<typename EnumT>
+    void registerEnum(const std::string& key, const std::string& display_name,
+                       std::initializer_list<std::pair<EnumT, const char*>> choices, EnumT default_value,
+                       const std::string& group = "", const std::string& tooltip = "");
+
+    // Live value accessors — what plugin code calls INSTEAD OF reading the SystemConstant.h constant.
+    template<typename T> T get(const std::string& key) const;
+    template<typename T> void set(const std::string& key, const T& value); // write-through via ConfigManager
+
+    const std::vector<ParamDef>& getAll() const;               // for schema export
+    std::vector<ValidationError> validate() const;              // no longer takes a ConfigManager& param
+    bool clampAndApply(const ParamDef& def);
+
+private:
+    std::string namespacedKey(const std::string& key) const;
+    std::shared_ptr<ConfigManager> m_config_;
+    std::string m_resolved_name_;
+    std::vector<ParamDef> m_params_;
+    mutable std::mutex m_mutex_;
+    bool m_detached_ = false;
+};
+2. ConfigManager additions — sdk/inc/configurations/ConfigManager.h / .cpp / .ipp
+Write-through set<T>(): today (ConfigManager.ipp:82-114) every set<T> specialization only mutates m_data_. Refactor to a single private helper that every specialization delegates to:
+
+// ConfigManager.h (private):
+void setRaw(const std::string& key, const std::string& value);
+
+// ConfigManager.cpp:
+void ConfigManager::setRaw(const std::string& key, const std::string& value) {
+    { std::lock_guard<std::mutex> lock(m_mutex_); m_data_[key] = value; }
+    save(); // write-through — persists immediately, creates the file if it doesn't exist yet
+}
+Each set<T> in ConfigManager.ipp becomes a one-liner, e.g. setRaw(key, std::to_string(value));. Note: this means each register*() call at plugin startup triggers a full app.ini rewrite — fine at current scale (dozens–low-hundreds of keys, microsecond-scale I/O); if it's ever a hot path (e.g. a UI slider firing set<float> every frame), fix it at the call site (e.g. ImGui's IsItemDeactivatedAfterEdit()), not by weakening the write-through guarantee.
+
+Live-registry (attach/detach) + schema methods, added to ConfigManager.h public section:
+
+class ParamRegistry; // forward declaration — avoids circular include; ParamRegistry.h keeps
+                      // #include "configurations/ConfigManager.h" (needs the full type), while
+                      // ConfigManager.h only forward-declares ParamRegistry.
+struct ParamDef;      // forward declaration sufficient here since writeParamSchema is declared,
+                      // not inline-implemented, in this header; ConfigManager.cpp includes the
+                      // full ParamRegistry.h for the implementation.
+
+std::string attachParamRegistry(const std::string& requestedName, ParamRegistry* registry);
+void detachParamRegistry(const std::string& resolvedName);
+std::map<std::string, ParamRegistry*> getAttachedParamRegistries() const; // snapshot copy
+bool writeParamSchema(const std::string& resolvedName, const std::vector<ParamDef>& defs);
+
+private:
+    void setRaw(const std::string& key, const std::string& value);
+    std::map<std::string, ParamRegistry*> m_attached_registries_;
+    mutable std::mutex m_registry_mutex_;   // separate from m_mutex_ — see Thread-safety below
+Collision resolution inside attachParamRegistry — simple linear probe:
+
+std::string ConfigManager::attachParamRegistry(const std::string& requestedName, ParamRegistry* registry) {
+    std::lock_guard<std::mutex> lock(m_registry_mutex_);
+    std::string candidate = requestedName;
+    int suffix = 2;
+    while (m_attached_registries_.count(candidate)) {
+        candidate = requestedName + "_" + std::to_string(suffix++);
+    }
+    m_attached_registries_[candidate] = registry;
+    return candidate;
+}
+writeParamSchema uses a plain std::ofstream (not save(), which is scoped to app.ini specifically) to write bin/params/<resolvedName>/schema.ini, calling std::filesystem::create_directories(...) first (same pattern already used by blobvizLiftPlugin.cpp's makeSessionLogPath()). INI format, one [key] section per param:
+
+[Robot.IP]
+type=string
+display_name=Robot Controller IP
+group=Robot
+tooltip=FANUC controller IPv4 address
+default=192.168.1.16
+
+[Robot.Port]
+type=int
+display_name=Robot Controller Port
+group=Robot
+tooltip=FANUC controller TCP port
+default=16001
+min=0
+max=65535
+INI over JSON: it's the only format used anywhere in this codebase's config surface (ConfigManager, TeaWhiskerConfig, blobvizlift.ini) — no JSON writer exists in the SDK core. Enum choices serialize as a delimited choices=0:Off,1:On,2:Auto value, following the same comma-list precedent as TeaWhiskerConfig's parseVec/formatVec.
+
+Overwrite the schema file every time (don't merge/append) — it should always reflect the current build's param set, not accumulate stale entries from a previous build.
+
+3. PluginContext additions — sdk/inc/plugin/PluginAPI.h
+struct PluginContext {
+    // ... existing members unchanged ...
+    std::vector<std::string> registeredParamRegistries; // holds RESOLVED names, for shutdown()
+
+    // Unlike registerService/registerView, a ParamRegistry isn't created via a factory — the plugin
+    // already owns the concrete object. The actual ConfigManager attach already happened in
+    // ParamRegistry's own constructor; this call is bookkeeping only, for symmetric shutdown.
+    void registerParamRegistry(ParamRegistry* reg) {
+        if (!reg) return;
+        registeredParamRegistries.push_back(reg->resolvedName());
+        if (logService) logService->log(LogLevel::INFO, "PluginAPI register param registry: " + reg->resolvedName());
+    }
+
+    void deregisterParamRegistry(const std::string& resolvedName) {
+        if (m_configManager_) m_configManager_->detachParamRegistry(resolvedName);
+        auto it = std::find(registeredParamRegistries.begin(), registeredParamRegistries.end(), resolvedName);
+        if (it != registeredParamRegistries.end()) registeredParamRegistries.erase(it);
+    }
+
+private:
+    friend class PluginManager;
+    // ... existing m_viewFactory_ etc. ...
+    ConfigManager* m_configManager_ = nullptr; // raw, set by PluginManager::populateContext()
+};
+PluginManager::populateContext() gains a ConfigManager* cm parameter (passed as AppContext::instance().configmanager.get() from Application::initPlugins()), stored into m_plugincontext_.m_configManager_ exactly like the four existing factory pointers.
+
+Add #include "configurations/ParamRegistry.h" to the top of PluginAPI.h.
+
+4. Hydration sequence — worked example in plugins/blobvizliftplugin/blobvizLiftPlugin.cpp
+void blobvizLiftPlugin::initialize(PluginContext& context) override {
+    // ... existing step 1: construct m_log_service_ ...
+
+    m_param_registry_ = std::make_shared<ParamRegistry>(AppContext::instance().configmanager, "blobvizLift");
+
+    m_param_registry_->registerString("Robot.IP", "Robot Controller IP",
+        blobvizift::ROBOT_CONTROLLER_IP_ADD, "Robot", "FANUC controller IPv4 address");
+    m_param_registry_->registerInt("Robot.Port", "Robot Controller Port", 0, 65535,
+        blobvizift::ROBOT_CONTROLLER_IP_ADD_PORT, "Robot", "FANUC controller TCP port");
+
+    AppContext::instance().configmanager->writeParamSchema(
+        m_param_registry_->resolvedName(), m_param_registry_->getAll());
+
+    context.registerParamRegistry(m_param_registry_.get());
+
+    // ... existing steps 2-4: services/views/tabs, m_model_.init(), etc. ...
+}
+From here on, code that needs Robot.IP/Robot.Port reads m_param_registry_->get<std::string>("Robot.IP") / get<int>("Robot.Port") instead of the SystemConstant.h constant directly — that substitution is what makes the value runtime-tunable. Per the settled scope, only this one param pair is migrated as the worked example; the rest of blobvizLift's constants and their call sites (FSM.cpp, nonVisAirCompTest*.cpp, etc.) are a follow-up. Wiring the live value into TabblobvizLiftModel mirrors the existing setLogService injection pattern (add a setParamRegistry(std::shared_ptr<ParamRegistry>)), rather than caching a copy, so a runtime edit is picked up the next time the model reads it (e.g. before its next reconnect attempt).
+
+shutdown() gets one addition, guarded like every other deregistration, placed last since ParamRegistry was constructed first:
+
+void shutdown() override {
+    if (!AppContext::instance().ShuttingDown) {
+        // ... existing deregisterTab/View/ViewModel/Service calls ...
+        if (m_param_registry_) m_context.deregisterParamRegistry(m_param_registry_->resolvedName());
+    }
+    if (m_log_service_) m_log_service_->log(LogLevel::INFO, "blobvizLiftPlugin: Shutting down.");
+}
+This must run before dlclose() (it already does — shutdown() always precedes dlclose() in both PluginManager::unloadPlugin() and shutdownPlugins()), otherwise ConfigManager's live registry would hold a dangling pointer into unloaded .so memory.
+
+5. Thread-safety
+ConfigManager::m_mutex_ (existing) continues to guard m_data_ only.
+New m_registry_mutex_ guards m_attached_registries_ separately — attach/detach happens rarely (plugin load/unload), while m_mutex_ is on the hot path of every get<T>/set<T> call; sharing one mutex would let a plugin load block a UI-thread config read for no benefit.
+ParamRegistry::m_mutex_ guards only its own m_params_ vector, independent of ConfigManager's mutexes. ParamRegistry never holds its own lock while calling into ConfigManager (each register*() calls m_config_->get/set first, then locks m_mutex_ only for the final m_params_.push_back) — no lock-ordering hazard between the two classes.
+writeParamSchema's file write needs no lock beyond m_registry_mutex_ while reading the resolved name — each instance writes to its own distinct bin/params/<resolvedName>/ directory, so no cross-instance race is possible.
+6. File-by-file changes
+New: - sdk/inc/configurations/ParamRegistry.h, sdk/src/configurations/ParamRegistry.cpp
+
+Deleted: - sdk/inc/parameters/ParamRegistry.h, sdk/src/parameters/ParamRegistry.cpp, sdk/inc/parameters/ParamDef.h
+
+Modified — SDK core: - sdk/inc/configurations/ConfigManager.h — forward-declare ParamRegistry/ParamDef; add attachParamRegistry/detachParamRegistry/getAttachedParamRegistries/writeParamSchema; add private setRaw; add m_attached_registries_ + m_registry_mutex_. - sdk/src/configurations/ConfigManager.cpp — #include "configurations/ParamRegistry.h"; implement the four new methods + setRaw + the INI schema writer (with create_directories). - sdk/src/configurations/ConfigManager.ipp — every set<T>/set(const char*) delegates to setRaw. - sdk/inc/plugin/PluginAPI.h — #include "configurations/ParamRegistry.h"; add registeredParamRegistries, registerParamRegistry/deregisterParamRegistry, and a raw ConfigManager* m_configManager_ member to PluginContext. - sdk/inc/plugin/PluginManager.h / sdk/src/plugin/PluginManager.cpp — populateContext() gains a ConfigManager* parameter, stored into m_plugincontext_.m_configManager_. - sdk/src/core/Application.cpp — the populateContext(...) call site (inside initPlugins()) passes AppContext::instance().configmanager.get().
+
+Modified — blobvizLift (worked example only, per settled scope): - plugins/blobvizliftplugin/blobvizLiftPlugin.cpp — construct m_param_registry_, register Robot.IP/Robot.Port, writeParamSchema, context.registerParamRegistry(...), deregisterParamRegistry in shutdown(), new member std::shared_ptr<ParamRegistry> m_param_registry_. - plugins/blobvizliftplugin/model/TabblobvizLiftModel.h/.cpp — add setParamRegistry(...) mirroring setLogService; the two migrated call sites read through it instead of the SystemConstant.h constant.
+
+Modified — standalone configurator (configurator/): - configurator/ParamRegistrations.cpp — delete; its hand-mirrored param list is replaced by schema-file discovery. - configurator/ConfiguratorPanel.h/.cpp — replace ParamRegistry::instance()/getAll() with a new std::vector<DiscoveredParam> scanParamSchemas(const std::string& paramsDir = "bin/params") that walks bin/params/*/schema.ini, parses each [key] section into a ParamDef, and prefixes the key with its directory name to get the namespaced app.ini key. Rendering logic (the std::visit over ParamMeta) is unchanged, just reads/writes the namespaced key. Reimplement validate()/ clampAndApply() as free functions over (const ConfigManager&, const std::vector<DiscoveredParam>&) since there's no single ParamRegistry instance to own them here. - configurator/main.cpp — drop the ParamRegistry::instance()/registerAllParams() startup block; call the new schema-scanning function instead. ConfigManager cfg(ini_path) is unchanged. - configurator/CMakeLists.txt — remove ParamRegistrations.cpp from sources; point at ${SDK_SRC}/configurations/ParamRegistry.cpp instead of ${SDK_SRC}/parameters/ParamRegistry.cpp.
+
+Verify during implementation: grep the full repo for any other reference to parameters/ParamRegistry.h, parameters/ParamDef.h, or sdk/inc|src/parameters before deleting — in particular check the sdk/gui/ tree and rdk//yikesblobvizliftplugin/ CMakeLists.txt files, which weren't fully audited during planning.
+
+Known limitation — standalone configurator discovery gap
+A plugin's schema only exists in bin/params/<name>/schema.ini after that plugin has been loaded at least once inside gui_app (only a live ParamRegistry ever calls writeParamSchema). The standalone param_configurator tool has no plugin loader of its own, so a plugin that has never run inside gui_app won't appear in the standalone tool yet, even though its eventual app.ini keys would be namespaced and valid once it does run. No garbage-collection for orphaned bin/params/<name>/ directories (e.g. after uninstalling a plugin) is included in this change — flagged as a possible future addition, not designed here.
+
+Verification plan
+Build: rm -rf build then rebuild via the repo's build script — confirms sdk/CMakeLists.txt's GLOB_RECURSE "src/*.cpp" picks up the new sdk/src/configurations/ParamRegistry.cpp and the deleted old path is gone; confirms gui_app and the migrated blobvizliftplugin link. Separately rebuild the param_configurator CMake target to confirm the updated source list compiles.
+First run: delete app.ini and bin/params/, launch gui_app. Confirm bin/params/blobvizLift/schema.ini is created, and app.ini contains blobvizLift.Robot.IP=192.168.1.16 / blobvizLift.Robot.Port=16001 (the SystemConstant.h defaults, now namespaced and persisted).
+Write-through + crash survival: edit blobvizLift.Robot.IP via the Configurator UI, confirm app.ini updates on disk immediately (no explicit save needed). kill -9 the process, relaunch, confirm the edited value — not the SystemConstant.h default — is what the plugin actually uses (e.g. visible in the connect-attempt log line).
+Duplicate-instance collision: load a second copy of a plugin .so under a different filename (needed since PluginManager::loadSinglePlugin refuses to load the identical file path twice) so both instances call attachParamRegistry("blobvizLift", ...). Confirm ConfigManager::getAttachedParamRegistries() contains both "blobvizLift" and "blobvizLift_2", app.ini has independent blobvizLift.* and blobvizLift_2.* keys, and both bin/params/blobvizLift/schema.ini / bin/params/blobvizLift_2/schema.ini exist with matching schema content under separate namespaces.
+Standalone tool round-trip: after step 2, launch param_configurator app.ini (no plugin ever loaded in that process) and confirm it discovers and renders blobvizLift.Robot.IP/Robot.Port via schema-file scanning. Edit a value there, then confirm gui_app's next launch picks it up.
+TODO: 1. NOw the UI tab where the parameters show up needs to become more advanced. Double click the cell in the value column for a particular param, then it becomes a modifiable field. THe user types it in. IF they press enter key or a floating save key that will be on the top right of that panel but move donwards as the user scrolls down that table, it updates that value in the param registry and potentially triggers a save of the ini file as well
+
+TO make #1 possible, I expect modify method in the param registry. I suspect that the config manager also needs to have that? Maybe not because code that uses the param registry can trigger a save to ini file through the param registry which then triggers the config manager to trigger the file write right?
+DONE — inline-editable parameter tab (TODO #1 + #2)
+Both TODOs above are implemented. ConfigManager needed no new method: the write path is View → ParamRegistry::modify() → ParamRegistry::set<T>() → ConfigManager::set<T>(), and ConfigManager::set<T> already write-throughs to app.ini on every call (coalesced when inside a beginBatch()/endBatch() section) — so triggering a save through the ParamRegistry is enough, exactly as guessed in TODO #2.
+
+TODO #2 — ParamRegistry::modify()
+New public method (sdk/inc/configurations/ParamRegistry.h + sdk/src/configurations/ParamRegistry.cpp):
+
+// Set a param's live value from a user-typed STRING (as the editor UI produces), parsing/
+// clamping to the param's REGISTERED type, then write-through via ConfigManager (persists app.ini).
+// Returns false — value untouched — on unknown key, unparseable text, or illegal enum choice.
+bool modify(const std::string& key, const std::string& rawValue);
+The edit widget only has a string; set<T>() can't take it without a compile-time T. modify() bridges that: it looks up the ParamDef, std::visits the meta, and does the type-aware conversion.
+Numeric → parse via std::stod (so "50" and "50.0" both work for an INT field), narrow to int/float/double, clamp to [min,max], set<T>.
+Enum / bool (bool is stored as a 0/1 enum) → accept only a value matching a registered choice; reject otherwise.
+String → stored verbatim, no parsing.
+Copies the ParamMeta out from under m_mutex_ before calling into ConfigManager, preserving the "never hold ParamRegistry's lock while calling ConfigManager" invariant from §5.
+TODO #1 — inline-editable value column + floating Save
+plugins/blobvizliftplugin/view/TabParamConfigView.{h,cpp} changed from read-only to editable (still discovers/reads through ConfigManager; writes go back through the owning ParamRegistry):
+
+Double-click a Value cell → it becomes an inline InputText seeded with the current value, auto-focused (SetKeyboardFocusHere + AutoSelectAll). Only one cell is editable at a time.
+Commit on Enter, click-away, or Escape — all route through registry->modify(key, text). Click-away commits (not cancels): clicking the Save overlay blurs the field in the same frame, so a cancel-on-blur would lose the edit before Save's handler runs. Escape still cancels via ImGui's own buffer revert (the resulting commit re-writes the unchanged original — a harmless no-op).
+Edit state is keyed by resolved-name + unqualified key, not a raw ParamRegistry*, so a stale pointer between frames is never dereferenced — the registry is re-looked-up by name at commit.
+Floating Save button — a borderless overlay window pinned to the table region's top-right in screen space, so it stays at the visible top-right as the table scrolls. A separate top-level window (rather than a SetCursorPos button drawn over table rows) avoids ImGui's item-overlap hover ambiguity and is always clickable. Turns green while an edit is pending; commits the active edit and calls cfg->save().
+Verified: builds clean via scripts/build.sh (libblobvizLiftPlugin.so linked + copied; only pre-existing unrelated warnings).
+
+
+
+
