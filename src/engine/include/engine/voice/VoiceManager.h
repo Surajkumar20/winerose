@@ -2,8 +2,8 @@
 
 #include "engine/voice/Voice.h"
 
-#include <array>
 #include <cstdint>
+#include <vector>
 
 namespace winerose::voice {
 
@@ -19,22 +19,24 @@ class VoiceManager {
 public:
     static constexpr int kMaxVoices = 64;
 
+    VoiceManager() : m_voices(kMaxVoices) {}   // heap pool: a Voice carries its modulation state (~10 KB)
+
     void prepare(double sampleRate) noexcept;
     void reset() noexcept;
 
-    void noteOn(int note, int polyphony, const VoiceControl& control) noexcept;
+    void noteOn(int note, int velocity, int polyphony, const ControlContext& ctx) noexcept;
     void noteOff(int note) noexcept;
     void setSustainPedal(bool down) noexcept;
     void allNotesOff() noexcept;   // release everything (CC 123)
     void allSoundOff() noexcept;   // silence immediately (CC 120)
 
-    void control(const VoiceControl& control) noexcept;
+    void control(const ControlContext& ctx) noexcept;
     void render(float* left, float* right, int numSamples, const VoiceTables& tables) noexcept;
 
     int activeCount() const noexcept;
 
 private:
-    std::array<Voice, kMaxVoices> m_voices;
+    std::vector<Voice> m_voices;   // sized once in the constructor, never resized
     std::uint64_t m_order = 0;
     Rng m_rng;
     bool m_sustainPedal = false;

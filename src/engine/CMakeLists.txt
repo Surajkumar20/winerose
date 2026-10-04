@@ -5,6 +5,10 @@ add_library(winerose_engine STATIC
     src/dsp/Fft.cpp
     src/dsp/WavetableBank.cpp
     src/dsp/NoiseTable.cpp
+    src/dsp/Curve.cpp
+    src/modulation/ModTargets.cpp
+    src/modulation/Lfo.cpp
+    src/modules/EngineModules.cpp
     src/modules/Modules.cpp
     src/voice/Voice.cpp
     src/voice/VoiceManager.cpp)

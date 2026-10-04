@@ -423,3 +423,41 @@ Where the code differs from, or adds detail to, the sections above:
 - **Performance note:** `WavetableBank::read` mixes frames and mip levels on the four input samples, then runs
   one Hermite; this is exact because Hermite is linear in its samples. Keep its scalar locals: an array-based
   version made MSVC stall on store forwarding and tripled the cost of the level crossfade.
+
+### Phase 3 (SPEC §5.4): done
+
+- **Modulation architecture:** every numeric module parameter is registered in `modulation::ModTargets`.
+  At each control tick the Engine reads all of them into a base array. Each voice copies it, applies its
+  matrix slots in normalized space (clamped), and rebuilds its settings through `EngineModules::build`.
+  Modules read plain values from that array, so modulated and unmodulated values take the same code path.
+- **Sources** (all normalized to 0..1; a slot's bipolar switch maps to -1..1): Env 1–4 (`Env0` is still
+  amplitude), LFO 1–10, Macro 1–8, velocity, note, mod wheel (CC1), pitch bend, channel aftertouch, two
+  per-note randoms, fixed.
+- **Matrix** (`ModSlot0..63`):
+  - Fields: source, destination (string, e.g. `"Filter0.cutoff"`), amount (-1..1, the only host-automatable
+    field), bipolar, curve, aux, aux depth, aux invert, output scale, bypass.
+  - Destinations are resolved to target indices in the `EngineSnapshot` whenever a string changes.
+  - Macros are destinations too: slots into macros run first, so a macro feeding a macro reads the
+    unmodulated value.
+  - Aux deviates from the SPEC's literal `aux × auxAmt`: the factor is `1 - depth + depth·aux`, so depth 0
+    means "no aux" instead of muting the slot.
+- **LFOs** (`LFO0..9`):
+  - Shapes: drawable Path (string curve, band-limited into a mip table), sine, triangle, saws, square, S&H,
+    smooth random, Lorenz, Rössler (RK4, running min/max).
+  - Modes: Free (one phase shared by all voices), Trig, Env (one-shot, then hold).
+  - Rate: Hz (0.01 Hz–1 kHz) or tempo-synced, 8 bars to 1/64 with dotted/triplet.
+  - Phase, delay, rise, smoothing.
+  - Measured: worst alias of a 1 kHz saw LFO is -158.8 dB (criterion: alias-free).
+- **Audio-rate path:** slots from a non-chaos LFO to oscillator coarse/fine/level/wavetable position or
+  filter cutoff run per sample. A 1 kHz sine LFO on pitch produces clean ±1 kHz sidebands; the region where
+  control-rate stepping would alias sits at -148 dB. All other slots run at the 32-sample control rate.
+- **Also new:** `Oscillator*.coarse` (continuous ±48 st, the usual pitch-mod target); envelope curve
+  parameters (attack/decay/release, -10..10); drawable `remapCurve` per oscillator (completes warps Remap 1/2);
+  `Global.bendUp`/`bendDown` (default ±2 st).
+- **Voice pool moved to the heap:** each voice now carries about 10 KB of modulation state.
+- **CPU:** 16 voices × 3 osc × 7 unison = 23.8% of one core with the matrix active (Phase 2: 21.3%). Still
+  under the 25% criterion, but the headroom is small; SIMD unison is the next lever.
+- **Generic editor:** about 900 rows, 640 of them for the 64 matrix slots. It's usable with the scroller, but
+  the real mod-matrix UI belongs to `feature/UI`.
+- **Not yet:** BPM-synced envelopes, Start/End on envelopes 2–4, LFO loopback point (Env mode), poly
+  aftertouch / MPE sources, and audio-rate oscillator/filter outputs as sources (Serum 2) — later phases.

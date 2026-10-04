@@ -2,8 +2,9 @@
 
 #include "engine/EngineTypes.h"
 #include "engine/Smoother.h"
+#include "engine/dsp/Curve.h"
 #include "engine/dsp/WavetableBank.h"
-#include "engine/modules/Modules.h"
+#include "engine/modules/EngineModules.h"
 #include "engine/voice/VoiceManager.h"
 
 #include "params/ConfigManager.h"
@@ -14,6 +15,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <string>
 
 namespace winerose {
 
@@ -24,31 +26,36 @@ inline constexpr const char* module       = "Global";
 inline constexpr const char* masterVolume = "masterVolume";
 inline constexpr const char* quality      = "quality";
 inline constexpr const char* polyphony    = "polyphony";
+inline constexpr const char* bendUp       = "bendUp";
+inline constexpr const char* bendDown     = "bendDown";
 }
 
 enum class Quality { Good = 0, High = 1, Ultra = 2 };
 
-// Immutable non-automatable engine state, rebuilt on the message thread and adopted by the audio
-// thread at block start (SPEC §5.3). Voices read tables through the CURRENT snapshot every block and never
-// cache them, so a retired snapshot's tables are never touched after it is swapped out.
+// Immutable non-automatable engine state, rebuilt on the message thread and adopted by the audio thread at
+// block start (SPEC §5.3). Voices read through the CURRENT snapshot every block and never cache its tables.
 struct EngineSnapshot {
     std::uint64_t revision = 0;
     std::array<std::shared_ptr<const dsp::WavetableBank>, voice::kOscCount> oscTables;   // Oscillator0..2
+    std::array<std::shared_ptr<const dsp::CurveTable>, voice::kOscCount>    remapCurves;  // warp Remap 1/2
     std::shared_ptr<const dsp::WavetableBank> subTable;     // Oscillator4 shapes
     std::shared_ptr<const dsp::NoiseTables>   noiseTables;  // Oscillator3 sources
+    std::shared_ptr<const dsp::WavetableBank> lfoShapes;    // fixed LFO shapes (Sine..Square)
+    std::array<std::shared_ptr<const dsp::WavetableBank>, modulation::kLfoCount> lfoPaths;   // drawable shapes
+    std::array<std::int16_t, modulation::kSlotCount> slotDest {};   // mod-matrix destination → target index (-1 = none)
 };
 
 /**
  * @class Engine
  * @brief The synth. JUCE-free; driven through POD types by whichever host adapter owns it (PLAN.md §1.3).
  *
- * Phases 1-2 (SPEC §5.4): wavetable oscillators A/B/C (Oscillator0..2: mipmapped tables, unison up to 16,
- * dual warp), noise (Oscillator3) and sub (Oscillator4), the SVF low-pass (Filter0), the amp envelope (Env0),
- * a 64-voice pool (polyphony default 16) and Quality-dependent oversampling of warped oscillators.
+ * Phases 1-3 (SPEC §5.4): oscillators A/B/C (unison, dual warp), noise, sub, Filter0, four envelopes
+ * (Env0 = amplitude), ten LFOs, eight macros and the 64-slot mod matrix, 64-voice pool, Quality
+ * oversampling, pitch bend.
  *
  * Block-size independence: process() splits the host block into chunks that end at MIDI events and at
- * every kControlBlock-sample boundary of the ABSOLUTE sample count. Parameters are read and control values
- * recomputed only on those boundaries, so the output is identical whatever block sizes the host uses.
+ * every kControlBlock-sample boundary of the ABSOLUTE sample count. Parameters are read and modulation
+ * evaluated only on those boundaries, so the output is identical whatever block sizes the host uses.
  */
 class Engine {
 public:
@@ -72,7 +79,8 @@ public:
     int  latencySamples() const noexcept { return 0; }
     void reset() noexcept;
 
-    /** Message thread: rebuild + publish the EngineSnapshot (on batch end / structural edits). */
+    /** Message thread: rebuild + publish the EngineSnapshot (matrix routing, curves, tables). Called by the
+     *  control layer on batch end and whenever a string parameter (destination, curve) changes. */
     void publishSnapshot();
 
     /** Message thread: replace oscillator A/B/C's (index 0..2) wavetable; takes effect at the next block. */
@@ -83,34 +91,44 @@ public:
     double sampleRate() const noexcept { return m_sampleRate; }
     int    activeVoiceCount() const noexcept { return m_voices.activeCount(); }
 
+    const modules::EngineModules& modules() const noexcept { return *m_modules; }
     std::shared_ptr<ConfigManager> configManager() const { return m_config; }
 
 private:
     void controlTick() noexcept;
     void handleMidi(const MidiEvent& e) noexcept;
+    void advanceFreeLfos(int numSamples) noexcept;
+    void adoptSnapshot() noexcept;
 
-    std::shared_ptr<ConfigManager> m_config;
-    std::unique_ptr<ParamRegistry> m_global;
-    std::array<std::unique_ptr<modules::OscillatorModule>, voice::kOscCount> m_osc;
-    modules::NoiseModule           m_noise;
-    modules::SubOscModule          m_sub;
-    modules::FilterModule          m_filter0;
-    modules::EnvelopeModule        m_env0;
+    std::shared_ptr<ConfigManager>          m_config;
+    std::unique_ptr<ParamRegistry>          m_global;
+    std::unique_ptr<modules::EngineModules> m_modules;
 
-    ParamHandle    m_masterVolume, m_polyphony, m_quality;
+    ParamHandle    m_masterVolume, m_polyphony, m_quality, m_bendUp, m_bendDown;
     LinearSmoother m_masterGain;
 
-    voice::VoiceManager  m_voices;
-    voice::VoiceControl  m_control;
-    int                  m_polyphonyLimit = 16;
-    std::uint64_t        m_sampleClock = 0;
+    voice::VoiceManager    m_voices;
+    voice::ControlContext  m_context;
+    std::array<float, modules::ModTargets::kMaxTargets> m_base {};
+    std::array<modules::SlotParams, modulation::kSlotCount> m_slots {};
+    std::array<std::int16_t, modulation::kSlotCount> m_noSlots {};   // all -1: used before a snapshot exists
+    int           m_polyphonyLimit = 16;
+    std::uint64_t m_sampleClock = 0;
+    float         m_pitchBendRaw = 0.0f;   // -1..1
 
-    // Message-thread copies; published via the snapshot.
+    // Message-thread copies; published via the snapshot. Curve-derived tables are cached by their string.
     std::array<std::shared_ptr<const dsp::WavetableBank>, voice::kOscCount> m_oscTables;
     std::shared_ptr<const dsp::WavetableBank> m_subTable;
     std::shared_ptr<const dsp::NoiseTables>   m_noiseTables;
-    SnapshotExchange<EngineSnapshot>          m_snapshots;
-    std::uint64_t                             m_snapshotRevision = 0;
+    std::shared_ptr<const dsp::WavetableBank> m_lfoShapes;
+    std::array<std::string, modulation::kLfoCount> m_lfoPathText;
+    std::array<std::shared_ptr<const dsp::WavetableBank>, modulation::kLfoCount> m_lfoPaths;
+    std::array<std::string, voice::kOscCount> m_remapText;
+    std::array<std::shared_ptr<const dsp::CurveTable>, voice::kOscCount> m_remapCurves;
+
+    SnapshotExchange<EngineSnapshot> m_snapshots;
+    std::uint64_t                    m_snapshotRevision = 0;
+    const EngineSnapshot*            m_current = nullptr;   // audio thread: adopted this block
 
     MeterState m_meters;
     double     m_sampleRate   = 44100.0;

@@ -9,9 +9,8 @@ namespace winerose::dsp {
  * @brief Attack / hold / decay / sustain / release envelope (SPEC §1.6, §5.5), per sample.
  *
  * Stage shapes use the SPEC curve y = (exp(c·x) - 1) / (exp(c) - 1) over the stage's progress x in [0,1]
- * (c = 0 is linear). Attack and release start from the CURRENT level, so retriggers and steals don't click.
- * Curve amounts are fixed for now (attack linear, decay/release c = -5: fast start, slow tail); they become
- * parameters with the rest of the modulation work (Phase 3). TODO-MEASURE: Serum's default curves.
+ * (c = 0 is linear, c in [-10,10]). Attack and release start from the CURRENT level, so retriggers and steals
+ * don't click. Defaults: attack linear, decay/release c = -5 (fast start, slow tail). TODO-MEASURE: Serum's.
  */
 class Envelope {
 public:
@@ -21,6 +20,9 @@ public:
         float decaySeconds   = 1.0f;
         float sustain        = 1.0f;   // linear 0..1
         float releaseSeconds = 0.015f;
+        float attackCurve    = 0.0f;
+        float decayCurve     = -5.0f;
+        float releaseCurve   = -5.0f;
     };
 
     enum class Stage { Idle, Attack, Hold, Decay, Sustain, Release };
@@ -66,9 +68,6 @@ public:
     }
 
 private:
-    static constexpr float kDecayCurve   = -5.0f;
-    static constexpr float kReleaseCurve = -5.0f;
-
     void enter(Stage s) noexcept
     {
         m_stage = s;
@@ -76,10 +75,10 @@ private:
         m_from = m_level;
         double seconds = 0.0;
         switch (s) {
-            case Stage::Attack:  m_to = 1.0f;                seconds = m_settings.attackSeconds;  m_curve = 0.0f;          break;
-            case Stage::Hold:    m_to = 1.0f;                seconds = m_settings.holdSeconds;    m_curve = 0.0f;          break;
-            case Stage::Decay:   m_to = m_settings.sustain;  seconds = m_settings.decaySeconds;   m_curve = kDecayCurve;   break;
-            case Stage::Release: m_to = 0.0f;                seconds = m_settings.releaseSeconds; m_curve = kReleaseCurve; break;
+            case Stage::Attack:  m_to = 1.0f;               seconds = m_settings.attackSeconds;  m_curve = m_settings.attackCurve;  break;
+            case Stage::Hold:    m_to = 1.0f;               seconds = m_settings.holdSeconds;    m_curve = 0.0f;                    break;
+            case Stage::Decay:   m_to = m_settings.sustain; seconds = m_settings.decaySeconds;   m_curve = m_settings.decayCurve;   break;
+            case Stage::Release: m_to = 0.0f;               seconds = m_settings.releaseSeconds; m_curve = m_settings.releaseCurve; break;
             case Stage::Sustain: m_level = m_settings.sustain; return;
             case Stage::Idle:    m_level = 0.0f; return;
         }

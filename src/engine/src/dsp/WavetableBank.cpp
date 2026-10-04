@@ -33,7 +33,7 @@ std::vector<float> resampleFrame(const float* src, int srcSize)
 } // namespace
 
 std::shared_ptr<const WavetableBank> WavetableBank::build(const std::vector<float>& frames, int frameSize,
-                                                          std::string name)
+                                                          std::string name, bool removeDc)
 {
     std::shared_ptr<WavetableBank> bank(new WavetableBank());
     bank->m_name = std::move(name);
@@ -53,7 +53,7 @@ std::shared_ptr<const WavetableBank> WavetableBank::build(const std::vector<floa
         else                         frame = resampleFrame(src, frameSize);
 
         fft.forward(frame.data(), spectrum.data());
-        spectrum[0] = 0.0f;   // remove DC: an oscillator offset would thump through the filter and envelope
+        if (removeDc) spectrum[0] = 0.0f;   // an oscillator offset would thump through the filter and envelope
 
         for (int L = 0; L < kLevels; ++L) {
             const int keep = maxHarmonic(L);

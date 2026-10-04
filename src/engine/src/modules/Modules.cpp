@@ -7,7 +7,7 @@ namespace winerose::modules {
 
 namespace {
 
-// Envelope times: 0..32 s on a cubic knob (SPEC §5.5 hypothesis t = 32·x³, TODO-MEASURE).
+// Envelope / LFO times: 0..32 s on a cubic knob (SPEC §5.5 hypothesis t = 32·x³, TODO-MEASURE).
 const ParamOpts kTimeOpts { NumericMeta::Curve::Power, 3.0, "s" };
 
 template<std::size_t N>
@@ -18,13 +18,28 @@ std::vector<EnumChoice> choices(const char* const (&names)[N])
     return out;
 }
 
-int asInt(const ParamHandle& h) noexcept { return static_cast<int>(std::lround(h.load())); }
+std::vector<EnumChoice> divisionChoices()
+{
+    std::vector<EnumChoice> out;
+    for (int i = 0; i < modulation::kSyncDivisionCount; ++i) out.push_back({i, modulation::kSyncDivisions[i].name});
+    return out;
+}
+
+int asInt(float v) noexcept { return static_cast<int>(std::lround(v)); }
+
+template<typename E>
+E asEnum(float v, E count) noexcept
+{
+    return static_cast<E>(std::clamp(asInt(v), 0, static_cast<int>(count) - 1));
+}
+
+bool asBool(float v) noexcept { return v >= 0.5f; }
 
 } // namespace
 
 // --- Wavetable oscillator ----------------------------------------------------------------------------
 
-OscillatorModule::OscillatorModule(std::shared_ptr<ConfigManager> config, int index)
+OscillatorModule::OscillatorModule(std::shared_ptr<ConfigManager> config, int index, ModTargets& t)
     : m_registry(std::make_unique<ParamRegistry>(std::move(config), "Oscillator" + std::to_string(index)))
 {
     auto& r = *m_registry;
@@ -35,6 +50,8 @@ OscillatorModule::OscillatorModule(std::shared_ptr<ConfigManager> config, int in
     r.registerInt  (osc_keys::octave, 0, -4, 4, g, "Octave");
     r.registerInt  (osc_keys::semi, 0, -12, 12, g, "Semitones");
     r.registerFloat(osc_keys::fine, 0.0f, -100.0f, 100.0f, g, "Fine tune", ParamOpts{.unit = "cents"});
+    r.registerFloat(osc_keys::coarse, 0.0f, -48.0f, 48.0f, g, "Continuous pitch (the usual pitch modulation target)",
+                    ParamOpts{.unit = "st"});
     r.registerFloat(osc_keys::wtPos, 0.0f, 0.0f, 1.0f, g, "Wavetable position");
     r.registerBool (osc_keys::wtSmooth, true, g, "Smooth interpolation between frames (off: nearest frame)");
     r.registerFloat(osc_keys::phase, 0.0f, 0.0f, 1.0f, g, "Start phase (100% = Mem: continue from the last note)");
@@ -55,52 +72,61 @@ OscillatorModule::OscillatorModule(std::shared_ptr<ConfigManager> config, int in
     r.registerFloat(osc_keys::warp1Amount, 0.0f, 0.0f, 1.0f, gw, "Warp 1 amount");
     r.registerEnum (osc_keys::warp2Mode, choices(dsp::kWarpNames), 0, gw, "Warp 2 (applied after warp 1)");
     r.registerFloat(osc_keys::warp2Amount, 0.0f, 0.0f, 1.0f, gw, "Warp 2 amount");
+    r.registerString(osc_keys::remapCurve, dsp::Curve::identity().serialize(), gw,
+                     "Remap 1/2 curve: \"x,y,curve;...\" from x=0 to x=1");
 
-    m_enabled = r.handle(osc_keys::enabled);       m_level = r.handle(osc_keys::level);
-    m_pan = r.handle(osc_keys::pan);               m_octave = r.handle(osc_keys::octave);
-    m_semi = r.handle(osc_keys::semi);             m_fine = r.handle(osc_keys::fine);
-    m_wtPos = r.handle(osc_keys::wtPos);           m_wtSmooth = r.handle(osc_keys::wtSmooth);
-    m_phase = r.handle(osc_keys::phase);           m_random = r.handle(osc_keys::random);
-    m_unison = r.handle(osc_keys::unison);         m_uniDetune = r.handle(osc_keys::uniDetune);
-    m_uniBlend = r.handle(osc_keys::uniBlend);     m_uniWidth = r.handle(osc_keys::uniWidth);
-    m_uniRange = r.handle(osc_keys::uniRange);     m_uniStack = r.handle(osc_keys::uniStack);
-    m_uniMode = r.handle(osc_keys::uniMode);       m_uniSpan = r.handle(osc_keys::uniSpan);
-    m_uniRandStart = r.handle(osc_keys::uniRandStart); m_uniWarp = r.handle(osc_keys::uniWarp);
-    m_warp1Mode = r.handle(osc_keys::warp1Mode);   m_warp1Amount = r.handle(osc_keys::warp1Amount);
-    m_warp2Mode = r.handle(osc_keys::warp2Mode);   m_warp2Amount = r.handle(osc_keys::warp2Amount);
+    m_i.enabled = t.add(r, osc_keys::enabled);       m_i.level = t.add(r, osc_keys::level);
+    m_i.pan = t.add(r, osc_keys::pan);               m_i.octave = t.add(r, osc_keys::octave);
+    m_i.semi = t.add(r, osc_keys::semi);             m_i.fine = t.add(r, osc_keys::fine);
+    m_i.coarse = t.add(r, osc_keys::coarse);         m_i.wtPos = t.add(r, osc_keys::wtPos);
+    m_i.wtSmooth = t.add(r, osc_keys::wtSmooth);     m_i.phase = t.add(r, osc_keys::phase);
+    m_i.random = t.add(r, osc_keys::random);         m_i.unison = t.add(r, osc_keys::unison);
+    m_i.uniDetune = t.add(r, osc_keys::uniDetune);   m_i.uniBlend = t.add(r, osc_keys::uniBlend);
+    m_i.uniWidth = t.add(r, osc_keys::uniWidth);     m_i.uniRange = t.add(r, osc_keys::uniRange);
+    m_i.uniStack = t.add(r, osc_keys::uniStack);     m_i.uniMode = t.add(r, osc_keys::uniMode);
+    m_i.uniSpan = t.add(r, osc_keys::uniSpan);       m_i.uniRandStart = t.add(r, osc_keys::uniRandStart);
+    m_i.uniWarp = t.add(r, osc_keys::uniWarp);       m_i.warp1Mode = t.add(r, osc_keys::warp1Mode);
+    m_i.warp1Amount = t.add(r, osc_keys::warp1Amount);
+    m_i.warp2Mode = t.add(r, osc_keys::warp2Mode);
+    m_i.warp2Amount = t.add(r, osc_keys::warp2Amount);
 }
 
-OscillatorModule::Values OscillatorModule::read() const noexcept
+OscillatorModule::Values OscillatorModule::read(const float* v) const noexcept
 {
-    Values v;
-    v.enabled      = m_enabled.load() >= 0.5f;
-    v.level        = m_level.load();
-    v.pan          = m_pan.load();
-    v.pitchSemis   = m_octave.load() * 12.0f + m_semi.load() + m_fine.load() / 100.0f;
-    v.wtPos        = m_wtPos.load();
-    v.wtSmooth     = m_wtSmooth.load() >= 0.5f;
-    v.phase        = m_phase.load();
-    v.random       = m_random.load();
-    v.unison       = std::clamp(asInt(m_unison), 1, dsp::unison::kMaxVoices);
-    v.uniDetune    = m_uniDetune.load();
-    v.uniBlend     = m_uniBlend.load();
-    v.uniWidth     = m_uniWidth.load();
-    v.uniRange     = m_uniRange.load();
-    v.stack        = static_cast<dsp::unison::Stack>(std::clamp(asInt(m_uniStack), 0, static_cast<int>(dsp::unison::Stack::Count) - 1));
-    v.mode         = static_cast<dsp::unison::Mode>(std::clamp(asInt(m_uniMode), 0, static_cast<int>(dsp::unison::Mode::Count) - 1));
-    v.uniSpan      = m_uniSpan.load();
-    v.uniRandStart = m_uniRandStart.load();
-    v.uniWarp      = m_uniWarp.load();
-    v.warp1        = static_cast<dsp::WarpMode>(std::clamp(asInt(m_warp1Mode), 0, static_cast<int>(dsp::WarpMode::Count) - 1));
-    v.warp1Amount  = m_warp1Amount.load();
-    v.warp2        = static_cast<dsp::WarpMode>(std::clamp(asInt(m_warp2Mode), 0, static_cast<int>(dsp::WarpMode::Count) - 1));
-    v.warp2Amount  = m_warp2Amount.load();
-    return v;
+    Values o;
+    o.enabled      = asBool(v[m_i.enabled]);
+    o.level        = v[m_i.level];
+    o.pan          = v[m_i.pan];
+    o.pitchSemis   = v[m_i.octave] * 12.0f + v[m_i.semi] + v[m_i.coarse] + v[m_i.fine] / 100.0f;
+    o.wtPos        = v[m_i.wtPos];
+    o.wtSmooth     = asBool(v[m_i.wtSmooth]);
+    o.phase        = v[m_i.phase];
+    o.random       = v[m_i.random];
+    o.unison       = std::clamp(asInt(v[m_i.unison]), 1, dsp::unison::kMaxVoices);
+    o.uniDetune    = v[m_i.uniDetune];
+    o.uniBlend     = v[m_i.uniBlend];
+    o.uniWidth     = v[m_i.uniWidth];
+    o.uniRange     = v[m_i.uniRange];
+    o.stack        = asEnum(v[m_i.uniStack], dsp::unison::Stack::Count);
+    o.mode         = asEnum(v[m_i.uniMode], dsp::unison::Mode::Count);
+    o.uniSpan      = v[m_i.uniSpan];
+    o.uniRandStart = v[m_i.uniRandStart];
+    o.uniWarp      = v[m_i.uniWarp];
+    o.warp1        = asEnum(v[m_i.warp1Mode], dsp::WarpMode::Count);
+    o.warp1Amount  = v[m_i.warp1Amount];
+    o.warp2        = asEnum(v[m_i.warp2Mode], dsp::WarpMode::Count);
+    o.warp2Amount  = v[m_i.warp2Amount];
+    return o;
+}
+
+std::string OscillatorModule::remapCurve() const
+{
+    return m_registry->get<std::string>(osc_keys::remapCurve);
 }
 
 // --- Noise -------------------------------------------------------------------------------------------
 
-NoiseModule::NoiseModule(std::shared_ptr<ConfigManager> config)
+NoiseModule::NoiseModule(std::shared_ptr<ConfigManager> config, ModTargets& t)
     : m_registry(std::make_unique<ParamRegistry>(std::move(config), "Oscillator" + std::to_string(kIndex)))
 {
     auto& r = *m_registry;
@@ -111,26 +137,20 @@ NoiseModule::NoiseModule(std::shared_ptr<ConfigManager> config)
     r.registerFloat(noise_keys::pan, 0.0f, -1.0f, 1.0f, g, "Pan");
     r.registerBool (noise_keys::keytrack, false, g, "Playback rate follows the note");
     r.registerFloat(noise_keys::pitch, 0.0f, -48.0f, 48.0f, g, "Playback-rate offset", ParamOpts{.unit = "st"});
-    m_enabled = r.handle(noise_keys::enabled);  m_type = r.handle(noise_keys::type);
-    m_level = r.handle(noise_keys::level);      m_pan = r.handle(noise_keys::pan);
-    m_keytrack = r.handle(noise_keys::keytrack); m_pitch = r.handle(noise_keys::pitch);
+    m_enabled = t.add(r, noise_keys::enabled);   m_type = t.add(r, noise_keys::type);
+    m_level = t.add(r, noise_keys::level);       m_pan = t.add(r, noise_keys::pan);
+    m_keytrack = t.add(r, noise_keys::keytrack); m_pitch = t.add(r, noise_keys::pitch);
 }
 
-NoiseModule::Values NoiseModule::read() const noexcept
+NoiseModule::Values NoiseModule::read(const float* v) const noexcept
 {
-    return Values{
-        m_enabled.load() >= 0.5f,
-        static_cast<dsp::NoiseTables::Type>(std::clamp(asInt(m_type), 0, static_cast<int>(dsp::NoiseTables::Type::Count) - 1)),
-        m_level.load(),
-        m_pan.load(),
-        m_keytrack.load() >= 0.5f,
-        m_pitch.load(),
-    };
+    return Values{asBool(v[m_enabled]), asEnum(v[m_type], dsp::NoiseTables::Type::Count), v[m_level], v[m_pan],
+                  asBool(v[m_keytrack]), v[m_pitch]};
 }
 
 // --- Sub ---------------------------------------------------------------------------------------------
 
-SubOscModule::SubOscModule(std::shared_ptr<ConfigManager> config)
+SubOscModule::SubOscModule(std::shared_ptr<ConfigManager> config, ModTargets& t)
     : m_registry(std::make_unique<ParamRegistry>(std::move(config), "Oscillator" + std::to_string(kIndex)))
 {
     auto& r = *m_registry;
@@ -140,25 +160,19 @@ SubOscModule::SubOscModule(std::shared_ptr<ConfigManager> config)
     r.registerInt  (sub_keys::octave, 0, -4, 4, g, "Octave (TODO-MEASURE default)");
     r.registerFloat(sub_keys::level, 0.75f, 0.0f, 1.0f, g, "Level");
     r.registerFloat(sub_keys::pan, 0.0f, -1.0f, 1.0f, g, "Pan");
-    m_enabled = r.handle(sub_keys::enabled);  m_shape = r.handle(sub_keys::shape);
-    m_octave = r.handle(sub_keys::octave);    m_level = r.handle(sub_keys::level);
-    m_pan = r.handle(sub_keys::pan);
+    m_enabled = t.add(r, sub_keys::enabled);  m_shape = t.add(r, sub_keys::shape);
+    m_octave = t.add(r, sub_keys::octave);    m_level = t.add(r, sub_keys::level);
+    m_pan = t.add(r, sub_keys::pan);
 }
 
-SubOscModule::Values SubOscModule::read() const noexcept
+SubOscModule::Values SubOscModule::read(const float* v) const noexcept
 {
-    return Values{
-        m_enabled.load() >= 0.5f,
-        static_cast<dsp::SubShape>(std::clamp(asInt(m_shape), 0, static_cast<int>(dsp::SubShape::Count) - 1)),
-        m_octave.load() * 12.0f,
-        m_level.load(),
-        m_pan.load(),
-    };
+    return Values{asBool(v[m_enabled]), asEnum(v[m_shape], dsp::SubShape::Count), v[m_octave] * 12.0f, v[m_level], v[m_pan]};
 }
 
 // --- Filter ------------------------------------------------------------------------------------------
 
-FilterModule::FilterModule(std::shared_ptr<ConfigManager> config, int index)
+FilterModule::FilterModule(std::shared_ptr<ConfigManager> config, int index, ModTargets& t)
     : m_registry(std::make_unique<ParamRegistry>(std::move(config), "Filter" + std::to_string(index)))
 {
     auto& r = *m_registry;
@@ -168,20 +182,19 @@ FilterModule::FilterModule(std::shared_ptr<ConfigManager> config, int index)
                     "Cutoff (exponential knob, INFERRED range 8.18 Hz - 22.05 kHz)",
                     ParamOpts{NumericMeta::Curve::Exp, 1.0, "Hz"});
     r.registerFloat(filter_keys::resonance, 0.1f, 0.0f, 1.0f, g, "Resonance (TODO-MEASURE default)");
-
-    m_enabled   = r.handle(filter_keys::enabled);
-    m_cutoff    = r.handle(filter_keys::cutoff);
-    m_resonance = r.handle(filter_keys::resonance);
+    m_enabled   = t.add(r, filter_keys::enabled);
+    m_cutoff    = t.add(r, filter_keys::cutoff);
+    m_resonance = t.add(r, filter_keys::resonance);
 }
 
-FilterModule::Values FilterModule::read() const noexcept
+FilterModule::Values FilterModule::read(const float* v) const noexcept
 {
-    return Values{m_enabled.load() >= 0.5f, m_cutoff.load(), m_resonance.load()};
+    return Values{asBool(v[m_enabled]), v[m_cutoff], v[m_resonance]};
 }
 
 // --- Envelope ----------------------------------------------------------------------------------------
 
-EnvelopeModule::EnvelopeModule(std::shared_ptr<ConfigManager> config, int index)
+EnvelopeModule::EnvelopeModule(std::shared_ptr<ConfigManager> config, int index, ModTargets& t)
     : m_registry(std::make_unique<ParamRegistry>(std::move(config), "Env" + std::to_string(index)))
 {
     auto& r = *m_registry;
@@ -192,17 +205,139 @@ EnvelopeModule::EnvelopeModule(std::shared_ptr<ConfigManager> config, int index)
     r.registerFloat(env_keys::decay, d.decaySeconds, 0.0f, 32.0f, g, "Decay time", kTimeOpts);
     r.registerFloat(env_keys::sustain, d.sustain, 0.0f, 1.0f, g, "Sustain level (linear; TODO-MEASURE dB law)");
     r.registerFloat(env_keys::release, d.releaseSeconds, 0.0f, 32.0f, g, "Release time", kTimeOpts);
-
-    m_attack  = r.handle(env_keys::attack);
-    m_hold    = r.handle(env_keys::hold);
-    m_decay   = r.handle(env_keys::decay);
-    m_sustain = r.handle(env_keys::sustain);
-    m_release = r.handle(env_keys::release);
+    r.registerFloat(env_keys::attackCurve, d.attackCurve, -10.0f, 10.0f, g, "Attack curve (0 = linear)");
+    r.registerFloat(env_keys::decayCurve, d.decayCurve, -10.0f, 10.0f, g, "Decay curve (negative = fast start)");
+    r.registerFloat(env_keys::releaseCurve, d.releaseCurve, -10.0f, 10.0f, g, "Release curve (negative = fast start)");
+    m_attack = t.add(r, env_keys::attack);     m_hold = t.add(r, env_keys::hold);
+    m_decay = t.add(r, env_keys::decay);       m_sustain = t.add(r, env_keys::sustain);
+    m_release = t.add(r, env_keys::release);   m_attackCurve = t.add(r, env_keys::attackCurve);
+    m_decayCurve = t.add(r, env_keys::decayCurve);
+    m_releaseCurve = t.add(r, env_keys::releaseCurve);
 }
 
-dsp::Envelope::Settings EnvelopeModule::read() const noexcept
+dsp::Envelope::Settings EnvelopeModule::read(const float* v) const noexcept
 {
-    return {m_attack.load(), m_hold.load(), m_decay.load(), m_sustain.load(), m_release.load()};
+    dsp::Envelope::Settings s;
+    s.attackSeconds  = v[m_attack];
+    s.holdSeconds    = v[m_hold];
+    s.decaySeconds   = v[m_decay];
+    s.sustain        = v[m_sustain];
+    s.releaseSeconds = v[m_release];
+    s.attackCurve    = v[m_attackCurve];
+    s.decayCurve     = v[m_decayCurve];
+    s.releaseCurve   = v[m_releaseCurve];
+    return s;
+}
+
+// --- LFO ---------------------------------------------------------------------------------------------
+
+LfoModule::LfoModule(std::shared_ptr<ConfigManager> config, int index, ModTargets& t)
+    : m_registry(std::make_unique<ParamRegistry>(std::move(config), "LFO" + std::to_string(index)))
+{
+    auto& r = *m_registry;
+    const std::string g = "LFO";
+    r.registerEnum (lfo_keys::shape, choices(modulation::kLfoShapeNames), 0, g, "Shape (Path = the drawable curve)");
+    r.registerString(lfo_keys::path, dsp::Curve::triangle().serialize(), g, "Drawable shape: \"x,y,curve;...\"");
+    r.registerEnum (lfo_keys::mode, choices(modulation::kLfoModeNames), static_cast<int>(modulation::LfoMode::Trig), g,
+                    "Free: shared free-running phase; Trig: restart per note; Env: one-shot (TODO-MEASURE default)");
+    r.registerBool (lfo_keys::sync, true, g, "Tempo sync (TODO-MEASURE default)");
+    r.registerEnum (lfo_keys::division, divisionChoices(), modulation::kDefaultSyncDivision, g, "Synced rate");
+    r.registerFloat(lfo_keys::rate, 1.0f, 0.01f, 1000.0f, g, "Free rate (up to audio rate)",
+                    ParamOpts{NumericMeta::Curve::Exp, 1.0, "Hz"});
+    r.registerFloat(lfo_keys::phase, 0.0f, 0.0f, 1.0f, g, "Start phase (Trig / Env)");
+    r.registerFloat(lfo_keys::delay, 0.0f, 0.0f, 32.0f, g, "Delay before the LFO starts", kTimeOpts);
+    r.registerFloat(lfo_keys::rise, 0.0f, 0.0f, 32.0f, g, "Fade-in time after the delay", kTimeOpts);
+    r.registerFloat(lfo_keys::smooth, 0.0f, 0.0f, 1.0f, g, "Output smoothing (0-100 ms, INFERRED)");
+    m_shape = t.add(r, lfo_keys::shape);       m_mode = t.add(r, lfo_keys::mode);
+    m_sync = t.add(r, lfo_keys::sync);         m_division = t.add(r, lfo_keys::division);
+    m_rate = t.add(r, lfo_keys::rate);         m_phase = t.add(r, lfo_keys::phase);
+    m_delay = t.add(r, lfo_keys::delay);       m_rise = t.add(r, lfo_keys::rise);
+    m_smooth = t.add(r, lfo_keys::smooth);
+}
+
+modulation::LfoSettings LfoModule::read(const float* v) const noexcept
+{
+    modulation::LfoSettings s;
+    s.shape        = asEnum(v[m_shape], modulation::LfoShape::Count);
+    s.mode         = asEnum(v[m_mode], modulation::LfoMode::Count);
+    s.sync         = asBool(v[m_sync]);
+    s.division     = std::clamp(asInt(v[m_division]), 0, modulation::kSyncDivisionCount - 1);
+    s.rateHz       = v[m_rate];
+    s.phase        = v[m_phase];
+    s.delaySeconds = v[m_delay];
+    s.riseSeconds  = v[m_rise];
+    s.smooth       = v[m_smooth];
+    return s;
+}
+
+std::string LfoModule::path() const
+{
+    return m_registry->get<std::string>(lfo_keys::path);
+}
+
+// --- Macro -------------------------------------------------------------------------------------------
+
+MacroModule::MacroModule(std::shared_ptr<ConfigManager> config, int index, ModTargets& t)
+    : m_registry(std::make_unique<ParamRegistry>(std::move(config), "Macro" + std::to_string(index)))
+{
+    auto& r = *m_registry;
+    r.registerFloat(macro_keys::value, 0.0f, 0.0f, 1.0f, "Macro", "Macro value (also a modulation destination)");
+    r.registerString(macro_keys::name, "Macro " + std::to_string(index + 1), "Macro", "Display name");
+    m_value = t.add(r, macro_keys::value);
+}
+
+// --- Mod matrix --------------------------------------------------------------------------------------
+
+MatrixModule::MatrixModule(std::shared_ptr<ConfigManager> config)
+{
+    const ParamOpts fixed { .automatable = false };
+    for (int k = 0; k < modulation::kSlotCount; ++k) {
+        auto reg = std::make_unique<ParamRegistry>(config, "ModSlot" + std::to_string(k));
+        auto& r = *reg;
+        const std::string g = "Matrix";
+        // Topology (source, destination, switches) is patch state, not automation (SPEC §5.3); only the
+        // amount is host-automatable, like Serum 2's "Mod N" parameters.
+        r.registerEnum  (slot_keys::source, choices(modulation::kSourceNames), 0, g, "Source", fixed);
+        r.registerString(slot_keys::destination, "", g, "Destination parameter, e.g. \"Filter0.cutoff\"");
+        r.registerFloat (slot_keys::amount, 0.0f, -1.0f, 1.0f, g, "Amount (fraction of the destination's range)");
+        r.registerBool  (slot_keys::bipolar, false, g, "Bipolar: source 0..1 becomes -1..1", fixed);
+        r.registerFloat (slot_keys::curve, 0.0f, -1.0f, 1.0f, g, "Source curve (0 = linear)", fixed);
+        r.registerEnum  (slot_keys::aux, choices(modulation::kSourceNames), 0, g, "Aux source (multiplies the output)", fixed);
+        r.registerFloat (slot_keys::auxAmount, 1.0f, 0.0f, 1.0f, g, "Aux depth", fixed);
+        r.registerBool  (slot_keys::auxInvert, false, g, "Use 1 - aux", fixed);
+        r.registerFloat (slot_keys::output, 1.0f, 0.0f, 1.0f, g, "Output scale", fixed);
+        r.registerBool  (slot_keys::bypass, false, g, "Bypass this slot", fixed);
+
+        auto& h = m_handles[static_cast<std::size_t>(k)];
+        h.source = r.handle(slot_keys::source);       h.amount = r.handle(slot_keys::amount);
+        h.bipolar = r.handle(slot_keys::bipolar);     h.curve = r.handle(slot_keys::curve);
+        h.aux = r.handle(slot_keys::aux);             h.auxAmount = r.handle(slot_keys::auxAmount);
+        h.auxInvert = r.handle(slot_keys::auxInvert); h.output = r.handle(slot_keys::output);
+        h.bypass = r.handle(slot_keys::bypass);
+        m_slots[static_cast<std::size_t>(k)] = std::move(reg);
+    }
+}
+
+void MatrixModule::read(std::array<SlotParams, modulation::kSlotCount>& out) const noexcept
+{
+    for (std::size_t k = 0; k < out.size(); ++k) {
+        const auto& h = m_handles[k];
+        auto& s = out[k];
+        s.source    = asEnum(h.source.load(), modulation::Source::Count);
+        s.aux       = asEnum(h.aux.load(), modulation::Source::Count);
+        s.amount    = h.amount.load();
+        s.curve     = h.curve.load();
+        s.auxAmount = h.auxAmount.load();
+        s.output    = h.output.load();
+        s.bipolar   = asBool(h.bipolar.load());
+        s.auxInvert = asBool(h.auxInvert.load());
+        s.bypass    = asBool(h.bypass.load());
+    }
+}
+
+std::string MatrixModule::destination(int slot) const
+{
+    return m_slots[static_cast<std::size_t>(slot)]->get<std::string>(slot_keys::destination);
 }
 
 } // namespace winerose::modules

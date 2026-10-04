@@ -2,12 +2,13 @@
 
 #include "engine/Smoother.h"
 #include "engine/dsp/Envelope.h"
-#include "engine/dsp/NoiseTable.h"
 #include "engine/dsp/Svf.h"
 #include "engine/dsp/Unison.h"
 #include "engine/dsp/Warp.h"
 #include "engine/dsp/WavetableBank.h"
-#include "engine/modules/Modules.h"
+#include "engine/modulation/Lfo.h"
+#include "engine/modules/EngineModules.h"
+#include "engine/voice/VoiceSettings.h"
 
 #include "hiir/Downsampler2xFpu.h"
 
@@ -16,30 +17,7 @@
 
 namespace winerose::voice {
 
-inline constexpr int kControlBlock  = 32;
-inline constexpr int kMaxOversample = 4;
-inline constexpr int kOscCount      = modules::OscillatorModule::kCount;
 inline constexpr int kDownsamplerCoefs = 12;
-
-// Control-rate state shared by every voice, recomputed by the Engine at each control tick (every
-// kControlBlock samples, aligned to the absolute sample count so output doesn't depend on host block size).
-struct VoiceControl {
-    std::array<modules::OscillatorModule::Values, kOscCount> osc {};
-    modules::NoiseModule::Values  noise {};
-    modules::SubOscModule::Values sub {};
-    modules::FilterModule::Values filter {};
-    dsp::Envelope::Settings       env {};
-    dsp::Svf::Coefs               filterCoefs {};
-    double                        sampleRate = 48000.0;
-    int                           oversample = 1;   // 1, 2 or 4 (Quality, only when a warp needs it)
-};
-
-// Tables the voice reads this block, taken from the CURRENT EngineSnapshot (never cached across blocks).
-struct VoiceTables {
-    std::array<const dsp::WavetableBank*, kOscCount> osc {};
-    const dsp::WavetableBank* sub = nullptr;
-    const dsp::NoiseTables*   noise = nullptr;
-};
 
 /** Deterministic xorshift64* generator in [0,1). */
 struct Rng {
@@ -51,15 +29,41 @@ struct Rng {
         state ^= state >> 27;
         return static_cast<double>((state * 0x2545F4914F6CDD1Dull) >> 11) * (1.0 / 9007199254740992.0);
     }
+    std::uint64_t nextSeed() noexcept { next(); return state; }
+};
+
+/** Global (channel-wide) modulation sources and performance state. */
+struct GlobalModState {
+    float  modWheel   = 0.0f;
+    float  pitchBend  = 0.5f;   // 0..1, rest at 0.5
+    float  aftertouch = 0.0f;
+    float  bendSemis  = 0.0f;   // pitch-bend offset applied to every oscillator
+    double bpm        = 120.0;
+};
+
+/** What the Engine hands every voice at each control tick. */
+struct ControlContext {
+    const float* base = nullptr;                          // every ModTargets value, unmodulated
+    const modules::EngineModules* modules = nullptr;
+    const std::array<modules::SlotParams, modulation::kSlotCount>* slots = nullptr;
+    const std::array<std::int16_t, modulation::kSlotCount>* slotDest = nullptr;   // target index or -1
+    GlobalModState global;
+    std::array<double, modulation::kLfoCount> lfoFreePhase {};
+    double sampleRate = 48000.0;
+    int    oversample = 1;
+    VoiceTables tables;
 };
 
 /**
  * @class Voice
- * @brief One note (SPEC §5.4 Phases 1-2): oscillators A/B/C (unison up to 16, dual warp) + noise + sub →
- *        optional oversampling (HIIR half-band downsamplers) → stereo SVF low-pass → amp envelope (Env0).
- *        Allocation-free; all state lives in the VoiceManager's preallocated pool.
+ * @brief One note (SPEC §5.4 Phases 1-3): oscillators A/B/C (unison, dual warp) + noise + sub → optional
+ *        oversampling → stereo SVF low-pass → amp envelope, modulated per voice by Env1-4, LFO1-10, macros
+ *        and performance sources through the 64-slot matrix.
  *
- * Signal routing is "everything through Filter0 when enabled" until the routing matrix lands (Phase 4).
+ * Modulation runs at control rate (every kControlBlock samples): the voice copies the base values, applies
+ * its matrix slots in normalized space, clamps, and rebuilds its settings. Slots from a (non-chaos) LFO to
+ * oscillator pitch/level/wavetable position or filter cutoff instead run per sample, so audio-rate LFOs
+ * (up to 1 kHz) modulate without stair-stepping.
  */
 class Voice {
 public:
@@ -67,26 +71,29 @@ public:
 
     void prepare(double sampleRate) noexcept;
 
-    void start(int note, std::uint64_t order, const VoiceControl& control, Rng& rng) noexcept;
-    void release() noexcept { m_env.noteOff(); m_released = true; }
-    void kill() noexcept { m_env.reset(); m_released = true; }
+    void start(int note, int velocity, std::uint64_t order, const ControlContext& ctx, Rng& rng) noexcept;
+    void release() noexcept;
+    void kill() noexcept;
 
-    /** Retrigger an in-use voice for a new note (stealing): envelope attacks from its current level and
+    /** Retrigger an in-use voice for a new note (stealing): envelopes attack from their current level and
      *  oscillator phases continue, so the steal doesn't click. */
-    void steal(int note, std::uint64_t order, const VoiceControl& control) noexcept;
+    void steal(int note, int velocity, std::uint64_t order, const ControlContext& ctx) noexcept;
 
-    /** Control tick: recompute unison layout, increments and targets. */
-    void control(const VoiceControl& control) noexcept;
+    /** Control tick: evaluate modulation, rebuild settings, recompute layout. */
+    void control(const ControlContext& ctx) noexcept;
 
     /** Adds into left/right (numSamples <= kControlBlock). */
     void render(float* left, float* right, int numSamples, const VoiceTables& tables) noexcept;
 
-    bool          active() const noexcept { return m_env.isActive(); }
+    bool          active() const noexcept { return m_env[0].isActive(); }
     bool          released() const noexcept { return m_released; }
     int           note() const noexcept { return m_note; }
     std::uint64_t order() const noexcept { return m_order; }
     bool          sustained() const noexcept { return m_sustained; }
     void          setSustained(bool s) noexcept { m_sustained = s; }
+
+    /** Current value of a source for this voice (for tests / meters). */
+    float sourceValue(modulation::Source s) const noexcept;
 
 private:
     struct Unison {
@@ -110,8 +117,19 @@ private:
         float last = 0.0f;             // previous output (mono, unit level) for FM/AM/RM of the paired osc
     };
 
+    struct FastSlot {
+        int   lfo = 0;
+        float scale = 0.0f;            // amount · aux factor · output scale
+        float curve = 0.0f;
+        bool  bipolar = false;
+        modules::FastDest dest {};
+    };
+
+    void evaluateModulation(const ControlContext& ctx) noexcept;
     void layout(const VoiceControl& control) noexcept;
     void resetDownsamplers() noexcept;
+    void configureModSources(const ControlContext& ctx) noexcept;
+    float sourceAtTick(modulation::Source s) const noexcept;
 
     std::array<Osc, kOscCount> m_osc {};
 
@@ -136,7 +154,24 @@ private:
     dsp::Svf m_svfL, m_svfR;
     dsp::Svf::Coefs m_coefs {};
     bool m_filterOn = false;
-    dsp::Envelope m_env;
+
+    // Modulation
+    std::array<dsp::Envelope, modulation::kEnvCount> m_env;   // m_env[0] = amplitude
+    std::array<modulation::LfoState, modulation::kLfoCount> m_lfo;
+    std::array<bool, modulation::kLfoCount> m_lfoUsed {};     // referenced by any slot this tick
+    std::array<bool, modulation::kLfoCount> m_lfoFast {};     // advanced per sample by the fast path
+    std::array<FastSlot, modulation::kSlotCount> m_fast {};
+    int   m_fastCount = 0;
+    float m_cutoffNorm = 0.0f;        // control-rate cutoff, normalized (base for fast cutoff modulation)
+    float m_resonance = 0.0f;
+    std::array<float, modules::ModTargets::kMaxTargets> m_plain {};
+    std::array<float, modules::ModTargets::kMaxTargets> m_delta {};
+    std::array<std::int16_t, modulation::kSlotCount> m_touched {};
+    VoiceSettings m_settings {};
+    GlobalModState m_global {};
+    std::array<float, modulation::kMacroCount> m_macro {};
+    float m_velocity = 0.0f, m_noteNorm = 0.0f, m_random1 = 0.0f, m_random2 = 0.0f;
+    const modules::EngineModules* m_modules = nullptr;
 
     double        m_sampleRate = 48000.0;
     int           m_note = -1;

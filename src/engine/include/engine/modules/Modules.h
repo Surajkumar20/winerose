@@ -1,25 +1,32 @@
 #pragma once
 
+#include "engine/dsp/Curve.h"
 #include "engine/dsp/Envelope.h"
 #include "engine/dsp/NoiseTable.h"
 #include "engine/dsp/Unison.h"
 #include "engine/dsp/Warp.h"
 #include "engine/dsp/WavetableBank.h"
+#include "engine/modulation/Lfo.h"
+#include "engine/modulation/ModTargets.h"
+#include "engine/modulation/Sources.h"
 
 #include "params/ConfigManager.h"
 #include "params/ParamHandle.h"
 #include "params/ParamRegistry.h"
 
+#include <array>
 #include <memory>
 #include <string>
 
 namespace winerose::modules {
 
-// Each module: owns its ParamRegistry (named like the Serum 2 CBOR module it mirrors), registers its
-// parameters in the constructor, and offers read() — a lock-free snapshot of its plain values for the
-// audio thread, built from ParamHandles. Keys are listed next to each module; UIs address them as
-// "<Module><index>.<key>" (e.g. "Oscillator0.wtPos"). Defaults and enum orders marked TODO-MEASURE await
-// the measure_host sweep of Serum 2 (SPEC §5.10).
+// Each module owns its ParamRegistry (named like the Serum 2 CBOR module it mirrors), registers its
+// parameters in the constructor, adds every numeric one to the engine's ModTargets, and reads its plain
+// values back from a (possibly modulated) value array with read(const float*). Keys are listed next to
+// each module; UIs address them as "<Module><index>.<key>". Defaults and enum orders marked TODO-MEASURE
+// await the measure_host sweep of Serum 2 (SPEC §5.10).
+
+using modulation::ModTargets;
 
 // --- Wavetable oscillator (Oscillator0..2 = A/B/C) ---------------------------------------------------
 namespace osc_keys {
@@ -29,6 +36,7 @@ inline constexpr const char* pan          = "pan";
 inline constexpr const char* octave       = "octave";
 inline constexpr const char* semi         = "semi";
 inline constexpr const char* fine         = "fine";
+inline constexpr const char* coarse       = "coarse";
 inline constexpr const char* wtPos        = "wtPos";
 inline constexpr const char* wtSmooth     = "wtSmooth";
 inline constexpr const char* phase        = "phase";
@@ -47,6 +55,7 @@ inline constexpr const char* warp1Mode    = "warp1Mode";
 inline constexpr const char* warp1Amount  = "warp1Amount";
 inline constexpr const char* warp2Mode    = "warp2Mode";
 inline constexpr const char* warp2Amount  = "warp2Amount";
+inline constexpr const char* remapCurve   = "remapCurve";   // string: drawable curve for Remap 1/2
 }
 
 class OscillatorModule {
@@ -57,7 +66,7 @@ public:
         bool  enabled;
         float level;          // linear 0..1 (TODO-MEASURE dB law)
         float pan;            // -1..1
-        float pitchSemis;     // octave·12 + semi + fine/100
+        float pitchSemis;     // octave·12 + semi + coarse + fine/100
         float wtPos;          // 0..1 across the table's frames
         bool  wtSmooth;       // true: continuous morph between frames; false: snap to the nearest frame
         float phase;          // 0..1 start phase; >= kPhaseMem means "Mem" (continue from the last note)
@@ -79,15 +88,21 @@ public:
     };
     static constexpr float kPhaseMem = 0.999f;
 
-    OscillatorModule(std::shared_ptr<ConfigManager> config, int index);
-    Values read() const noexcept;
+    struct Indices {
+        int enabled, level, pan, octave, semi, fine, coarse, wtPos, wtSmooth, phase, random, unison, uniDetune,
+            uniBlend, uniWidth, uniRange, uniStack, uniMode, uniSpan, uniRandStart, uniWarp, warp1Mode,
+            warp1Amount, warp2Mode, warp2Amount;
+    };
+
+    OscillatorModule(std::shared_ptr<ConfigManager> config, int index, ModTargets& targets);
+    Values read(const float* v) const noexcept;
+    const Indices& indices() const noexcept { return m_i; }
     ParamRegistry& registry() noexcept { return *m_registry; }
+    std::string remapCurve() const;   // message thread
 
 private:
     std::unique_ptr<ParamRegistry> m_registry;
-    ParamHandle m_enabled, m_level, m_pan, m_octave, m_semi, m_fine, m_wtPos, m_wtSmooth, m_phase, m_random,
-                m_unison, m_uniDetune, m_uniBlend, m_uniWidth, m_uniRange, m_uniStack, m_uniMode, m_uniSpan,
-                m_uniRandStart, m_uniWarp, m_warp1Mode, m_warp1Amount, m_warp2Mode, m_warp2Amount;
+    Indices m_i {};
 };
 
 // --- Noise oscillator (Oscillator3, Serum's "NoiseOsc3") ---------------------------------------------
@@ -113,13 +128,13 @@ public:
         float pitchSemis;   // playback-rate offset
     };
 
-    explicit NoiseModule(std::shared_ptr<ConfigManager> config);
-    Values read() const noexcept;
+    NoiseModule(std::shared_ptr<ConfigManager> config, ModTargets& targets);
+    Values read(const float* v) const noexcept;
     ParamRegistry& registry() noexcept { return *m_registry; }
 
 private:
     std::unique_ptr<ParamRegistry> m_registry;
-    ParamHandle m_enabled, m_type, m_level, m_pan, m_keytrack, m_pitch;
+    int m_enabled, m_type, m_level, m_pan, m_keytrack, m_pitch;
 };
 
 // --- Sub oscillator (Oscillator4, Serum's "SubOsc4") -------------------------------------------------
@@ -143,13 +158,13 @@ public:
         float pan;
     };
 
-    explicit SubOscModule(std::shared_ptr<ConfigManager> config);
-    Values read() const noexcept;
+    SubOscModule(std::shared_ptr<ConfigManager> config, ModTargets& targets);
+    Values read(const float* v) const noexcept;
     ParamRegistry& registry() noexcept { return *m_registry; }
 
 private:
     std::unique_ptr<ParamRegistry> m_registry;
-    ParamHandle m_enabled, m_shape, m_octave, m_level, m_pan;
+    int m_enabled, m_shape, m_octave, m_level, m_pan;
 };
 
 // --- Filter (Filter0..1) -----------------------------------------------------------------------------
@@ -167,33 +182,122 @@ public:
         float resonance;   // 0..1
     };
 
-    FilterModule(std::shared_ptr<ConfigManager> config, int index);
-    Values read() const noexcept;
+    FilterModule(std::shared_ptr<ConfigManager> config, int index, ModTargets& targets);
+    Values read(const float* v) const noexcept;
+    int cutoffIndex() const noexcept { return m_cutoff; }
     ParamRegistry& registry() noexcept { return *m_registry; }
 
 private:
     std::unique_ptr<ParamRegistry> m_registry;
-    ParamHandle m_enabled, m_cutoff, m_resonance;
+    int m_enabled, m_cutoff, m_resonance;
 };
 
 // --- Envelope (Env0..3; Env0 drives amplitude) -------------------------------------------------------
 namespace env_keys {
-inline constexpr const char* attack  = "attack";
-inline constexpr const char* hold    = "hold";
-inline constexpr const char* decay   = "decay";
-inline constexpr const char* sustain = "sustain";
-inline constexpr const char* release = "release";
+inline constexpr const char* attack       = "attack";
+inline constexpr const char* hold         = "hold";
+inline constexpr const char* decay        = "decay";
+inline constexpr const char* sustain      = "sustain";
+inline constexpr const char* release      = "release";
+inline constexpr const char* attackCurve  = "attackCurve";
+inline constexpr const char* decayCurve   = "decayCurve";
+inline constexpr const char* releaseCurve = "releaseCurve";
 }
 
 class EnvelopeModule {
 public:
-    EnvelopeModule(std::shared_ptr<ConfigManager> config, int index);
-    dsp::Envelope::Settings read() const noexcept;
+    EnvelopeModule(std::shared_ptr<ConfigManager> config, int index, ModTargets& targets);
+    dsp::Envelope::Settings read(const float* v) const noexcept;
     ParamRegistry& registry() noexcept { return *m_registry; }
 
 private:
     std::unique_ptr<ParamRegistry> m_registry;
-    ParamHandle m_attack, m_hold, m_decay, m_sustain, m_release;
+    int m_attack, m_hold, m_decay, m_sustain, m_release, m_attackCurve, m_decayCurve, m_releaseCurve;
+};
+
+// --- LFO (LFO0..9) -----------------------------------------------------------------------------------
+namespace lfo_keys {
+inline constexpr const char* shape    = "shape";
+inline constexpr const char* path     = "path";       // string: drawable shape for LfoShape::Path
+inline constexpr const char* mode     = "mode";
+inline constexpr const char* sync     = "sync";
+inline constexpr const char* division = "division";
+inline constexpr const char* rate     = "rate";
+inline constexpr const char* phase    = "phase";
+inline constexpr const char* delay    = "delay";
+inline constexpr const char* rise     = "rise";
+inline constexpr const char* smooth   = "smooth";
+}
+
+class LfoModule {
+public:
+    LfoModule(std::shared_ptr<ConfigManager> config, int index, ModTargets& targets);
+    modulation::LfoSettings read(const float* v) const noexcept;
+    ParamRegistry& registry() noexcept { return *m_registry; }
+    std::string path() const;   // message thread
+    int shapeIndex() const noexcept { return m_shape; }
+
+private:
+    std::unique_ptr<ParamRegistry> m_registry;
+    int m_shape, m_mode, m_sync, m_division, m_rate, m_phase, m_delay, m_rise, m_smooth;
+};
+
+// --- Macro (Macro0..7) -------------------------------------------------------------------------------
+namespace macro_keys {
+inline constexpr const char* value = "value";
+inline constexpr const char* name  = "name";
+}
+
+class MacroModule {
+public:
+    MacroModule(std::shared_ptr<ConfigManager> config, int index, ModTargets& targets);
+    float read(const float* v) const noexcept { return v[m_value]; }
+    int valueIndex() const noexcept { return m_value; }
+    ParamRegistry& registry() noexcept { return *m_registry; }
+
+private:
+    std::unique_ptr<ParamRegistry> m_registry;
+    int m_value;
+};
+
+// --- Mod matrix (ModSlot0..63) -----------------------------------------------------------------------
+namespace slot_keys {
+inline constexpr const char* source      = "source";
+inline constexpr const char* destination = "destination";   // string: namespaced key, e.g. "Filter0.cutoff"
+inline constexpr const char* amount      = "amount";
+inline constexpr const char* bipolar     = "bipolar";
+inline constexpr const char* curve       = "curve";
+inline constexpr const char* aux         = "aux";
+inline constexpr const char* auxAmount   = "auxAmount";
+inline constexpr const char* auxInvert   = "auxInvert";
+inline constexpr const char* output      = "output";
+inline constexpr const char* bypass      = "bypass";
+}
+
+/** Live (per-tick) values of one matrix slot. The destination index comes from the snapshot. */
+struct SlotParams {
+    modulation::Source source = modulation::Source::None;
+    modulation::Source aux    = modulation::Source::None;
+    float amount = 0.0f;      // -1..1, in normalized destination units
+    float curve = 0.0f;       // -1..1 source curve (power law)
+    float auxAmount = 1.0f;   // 0..1
+    float output = 1.0f;      // 0..1 output scale
+    bool  bipolar = false;
+    bool  auxInvert = false;
+    bool  bypass = false;
+};
+
+class MatrixModule {
+public:
+    explicit MatrixModule(std::shared_ptr<ConfigManager> config);
+    void read(std::array<SlotParams, modulation::kSlotCount>& out) const noexcept;   // realtime
+    std::string destination(int slot) const;                                        // message thread
+    ParamRegistry& slot(int index) noexcept { return *m_slots[static_cast<std::size_t>(index)]; }
+
+private:
+    struct Handles { ParamHandle source, amount, bipolar, curve, aux, auxAmount, auxInvert, output, bypass; };
+    std::array<std::unique_ptr<ParamRegistry>, modulation::kSlotCount> m_slots;
+    std::array<Handles, modulation::kSlotCount> m_handles {};
 };
 
 } // namespace winerose::modules

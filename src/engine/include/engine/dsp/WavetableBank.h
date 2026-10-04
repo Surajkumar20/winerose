@@ -15,7 +15,7 @@ namespace winerose::dsp {
  *
  * SPEC §5.5. Built once on a non-realtime thread, then shared read-only with the audio thread through the
  * EngineSnapshot. Level L keeps harmonics 1 .. (1024 >> L) of every frame (DC removed), so level 0 is
- * full-band and level 10 is the pure fundamental.
+ * full-band and level 10 is the pure fundamental (plus DC when built with removeDc = false).
  *
  * Level selection (selectLevel) deviates from the SPEC's "floor(log2(inc·2048))" by one level: with that
  * formula the top harmonics of the chosen level can sit up to an octave above Nyquist. Using
@@ -36,10 +36,11 @@ public:
      * @param frames     concatenated single-cycle frames, frameCount × frameSize samples
      * @param frameSize  64..8192; resampled to 2048 if different
      * @param name       display name (e.g. file stem)
+     * @param removeDc   true for oscillators; false for LFO shapes, whose offset is part of the signal
      * Frames beyond kMaxFrames are dropped. An empty input yields a single silent frame.
      */
     static std::shared_ptr<const WavetableBank> build(const std::vector<float>& frames, int frameSize,
-                                                      std::string name);
+                                                      std::string name, bool removeDc = true);
 
     int                frameCount() const noexcept { return m_frameCount; }
     const std::string& name() const noexcept { return m_name; }

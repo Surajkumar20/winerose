@@ -1,5 +1,7 @@
 #pragma once
 
+#include "engine/dsp/Curve.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -14,8 +16,9 @@ namespace winerose::dsp {
  *
  * All formulas are the SPEC's reconstructions (INFERRED), not Xfer's code, and the menu ORDER is
  * TODO-MEASURE: the enum order becomes the automation/preset mapping, so confirm it against Serum's
- * warp menu with measure_host before release. Remap 1/2 use an identity curve until drawable curves land
- * with the modulation work (Phase 3), which makes Remap 1 a no-op and Remap 2 equal to Mirror for now.
+ * warp menu with measure_host before release. Remap 1 maps the phase through the oscillator's drawable
+ * remap curve; Remap 2 applies the same curve to the mirrored phase. Without a curve (or with the default
+ * identity curve) Remap 1 is a no-op and Remap 2 equals Mirror.
  */
 enum class WarpMode : int {
     Off = 0,
@@ -30,7 +33,7 @@ enum class WarpMode : int {
     AsymPlusMinus,  // bipolar asym (k = 0.5 neutral)
     Flip,           // polarity flip from position 1-k
     Mirror,         // second half mirrors the first
-    Remap1,         // drawable curve (identity until Phase 3)
+    Remap1,         // drawable curve
     Remap2,         // mirrored curve
     Remap3,         // sinusoidal remap
     Remap4,         // four sinusoidal segments
@@ -80,7 +83,7 @@ inline double warpPitchFactor(WarpMode m, float k) noexcept
 /** Whether a mode adds content the mip level can't account for (so oversampling helps). */
 constexpr bool warpNeedsOversampling(WarpMode m) noexcept
 {
-    return m != WarpMode::Off && m != WarpMode::Remap1;
+    return m != WarpMode::Off;
 }
 
 struct WarpOut {
@@ -102,8 +105,9 @@ inline double lerp(double a, double b, double t) noexcept { return a + (b - a) *
  * @param p    input phase in [0,1)
  * @param k    amount 0..1
  * @param mod  modulation input in -1..1 (paired osc / noise / sub sample) — ignored by other modes
+ * @param curve remap curve for Remap 1/2 (nullptr = identity)
  */
-inline WarpOut applyWarp(WarpMode mode, float k, double p, float mod) noexcept
+inline WarpOut applyWarp(WarpMode mode, float k, double p, float mod, const CurveTable* curve = nullptr) noexcept
 {
     using namespace warp_detail;
     constexpr double kPi = 3.14159265358979323846;
@@ -131,10 +135,13 @@ inline WarpOut applyWarp(WarpMode mode, float k, double p, float mod) noexcept
         case WarpMode::Flip:
             return {p, p < 1.0 - k ? 1.0f : -1.0f};
         case WarpMode::Mirror:
-        case WarpMode::Remap2:
             return {frac(lerp(p, mirror(p), k)), 1.0f};
         case WarpMode::Remap1:
-            return {p, 1.0f};
+            return {frac(lerp(p, curve != nullptr ? curve->lookup(p) : p, k)), 1.0f};
+        case WarpMode::Remap2: {
+            const double m = mirror(p);
+            return {frac(lerp(p, curve != nullptr ? curve->lookup(m) : m, k)), 1.0f};
+        }
         case WarpMode::Remap3:
             return {lerp(p, 0.5 - 0.5 * std::cos(kPi * p), k), 1.0f};
         case WarpMode::Remap4: {
@@ -158,11 +165,12 @@ inline WarpOut applyWarp(WarpMode mode, float k, double p, float mod) noexcept
 }
 
 /** Two chained warp slots. */
-inline WarpOut applyDualWarp(WarpMode m1, float k1, float mod1, WarpMode m2, float k2, float mod2, double p) noexcept
+inline WarpOut applyDualWarp(WarpMode m1, float k1, float mod1, WarpMode m2, float k2, float mod2, double p,
+                             const CurveTable* curve = nullptr) noexcept
 {
-    const WarpOut a = applyWarp(m1, k1, p, mod1);
+    const WarpOut a = applyWarp(m1, k1, p, mod1, curve);
     if (m2 == WarpMode::Off) return a;
-    const WarpOut b = applyWarp(m2, k2, a.phase, mod2);
+    const WarpOut b = applyWarp(m2, k2, a.phase, mod2, curve);
     return {b.phase, a.amp * b.amp};
 }
 

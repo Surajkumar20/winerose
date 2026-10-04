@@ -19,7 +19,7 @@ void VoiceManager::reset() noexcept
     m_sustainPedal = false;
 }
 
-void VoiceManager::noteOn(int note, int polyphony, const VoiceControl& control) noexcept
+void VoiceManager::noteOn(int note, int velocity, int polyphony, const ControlContext& ctx) noexcept
 {
     polyphony = std::clamp(polyphony, 1, kMaxVoices);
     const std::uint64_t order = ++m_order;
@@ -30,7 +30,7 @@ void VoiceManager::noteOn(int note, int polyphony, const VoiceControl& control) 
     if (active < polyphony) {
         for (auto& v : m_voices) {
             if (!v.active()) {
-                v.start(note, order, control, m_rng);
+                v.start(note, velocity, order, ctx, m_rng);
                 return;
             }
         }
@@ -48,7 +48,7 @@ void VoiceManager::noteOn(int note, int polyphony, const VoiceControl& control) 
             if (victim == nullptr || v.order() < victim->order()) victim = &v;
         }
     }
-    if (victim != nullptr) victim->steal(note, order, control);
+    if (victim != nullptr) victim->steal(note, velocity, order, ctx);
 }
 
 void VoiceManager::noteOff(int note) noexcept
@@ -90,10 +90,10 @@ void VoiceManager::allSoundOff() noexcept
     }
 }
 
-void VoiceManager::control(const VoiceControl& control) noexcept
+void VoiceManager::control(const ControlContext& ctx) noexcept
 {
     for (auto& v : m_voices)
-        if (v.active()) v.control(control);
+        if (v.active()) v.control(ctx);
 }
 
 void VoiceManager::render(float* left, float* right, int numSamples, const VoiceTables& tables) noexcept
