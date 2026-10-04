@@ -20,6 +20,8 @@ include(WineroseDependencies)
 include(WineroseTargetDefaults)
 include(WineroseLayering)
 
+add_subdirectory(libs)   # vendored hiir + pffft
+
 # Layers, bottom-up (PLAN.md §1.1). Each one is its own target with its own include root.
 add_subdirectory(src/params)
 add_subdirectory(src/engine)
