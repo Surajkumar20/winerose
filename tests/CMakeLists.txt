@@ -21,6 +21,7 @@ add_executable(winerose_tests
     unit/test_filters.cpp
     unit/test_fx.cpp
     unit/test_fx_engine.cpp
+    unit/test_presets.cpp
     unit/test_controller.cpp
     unit/test_preset_format.cpp
     unit/test_vendored_libs.cpp)

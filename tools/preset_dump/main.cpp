@@ -1,90 +1,122 @@
-// preset_dump — prints what a preset file is, plus whatever its container exposes without decoding.
+// preset_dump — prints what a preset file is and everything its container holds.
 //
-//   preset_dump <file>...
+//   preset_dump [--full] <file>...
 //
-// Today: container detection, the Winerose state document, the .SerumPreset header + JSON metadata block
-// (SPEC §2.1), and the .fxp/.fxb VST2 header (SPEC §2.2). Decompressing the Serum 2 zstd/CBOR payload and
-// the Serum 1 zlib state arrives with feature/presets, which extends this tool to dump the module map.
+// Winerose state: the JSON document. .SerumPreset: metadata + the decoded CBOR module map (each module's
+// plainParams keys and values; byte strings shown as sizes). With --full the whole CBOR document is printed as
+// JSON. .fxp/.fxb: VST2 header, inflated state metadata, extra stream sizes and the (inferred) parameter array.
+// Wavetable .wav: frame size/count and the clm flags. This is the tool for learning real Serum key names from
+// presets you own — paste its output into an issue/PR to extend presets/SerumTables.h.
 
+#include "presets/FxpFile.h"
 #include "presets/PresetFormat.h"
+#include "presets/SerumPresetFile.h"
+#include "presets/WavetableWav.h"
 
 #include <nlohmann/json.hpp>
 
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <string>
 #include <vector>
 
+using namespace winerose;
+using namespace winerose::presets;
+
 namespace {
 
 using Bytes = std::vector<std::uint8_t>;
 
-std::uint32_t le32(const Bytes& b, std::size_t o)
+// Replace byte strings with a "<N bytes>" marker so the dump stays readable.
+nlohmann::json summarizeBinary(const nlohmann::json& j)
 {
-    return static_cast<std::uint32_t>(b[o]) | (static_cast<std::uint32_t>(b[o + 1]) << 8)
-         | (static_cast<std::uint32_t>(b[o + 2]) << 16) | (static_cast<std::uint32_t>(b[o + 3]) << 24);
+    if (j.is_binary()) return "<" + std::to_string(j.get_binary().size()) + " bytes>";
+    if (j.is_object()) {
+        nlohmann::json out = nlohmann::json::object();
+        for (const auto& [k, v] : j.items()) out[k] = summarizeBinary(v);
+        return out;
+    }
+    if (j.is_array()) {
+        nlohmann::json out = nlohmann::json::array();
+        for (const auto& v : j) out.push_back(summarizeBinary(v));
+        return out;
+    }
+    return j;
 }
 
-std::uint64_t le64(const Bytes& b, std::size_t o)
+bool dumpSerumPreset(const Bytes& b, bool full)
 {
-    return static_cast<std::uint64_t>(le32(b, o)) | (static_cast<std::uint64_t>(le32(b, o + 4)) << 32);
-}
-
-std::uint32_t be32(const Bytes& b, std::size_t o)
-{
-    return (static_cast<std::uint32_t>(b[o]) << 24) | (static_cast<std::uint32_t>(b[o + 1]) << 16)
-         | (static_cast<std::uint32_t>(b[o + 2]) << 8) | static_cast<std::uint32_t>(b[o + 3]);
-}
-
-std::string fixedString(const Bytes& b, std::size_t o, std::size_t len)
-{
-    std::string s;
-    for (std::size_t i = o; i < o + len && i < b.size() && b[i] != 0; ++i) s.push_back(static_cast<char>(b[i]));
-    return s;
-}
-
-std::string tag(const Bytes& b, std::size_t o) { return std::string(reinterpret_cast<const char*>(b.data() + o), 4); }
-
-bool dumpSerumPreset(const Bytes& b)
-{
-    // 0: "XferJson\0" | 9: u64 N | 17: JSON[N] | 17+N: u32 CBOR size | 21+N: u32 version | 25+N: zstd(CBOR)
-    const std::uint64_t n = le64(b, 9);
-    if (17 + n + 8 > b.size()) {
-        std::cout << "  truncated: JSON length " << n << " exceeds file size\n";
+    std::string error;
+    const auto file = SerumPresetFile::read(b, error);
+    if (!file) {
+        std::cout << "  error: " << error << "\n";
         return false;
     }
-    const std::size_t o = static_cast<std::size_t>(17 + n);
-    const std::string jsonText(reinterpret_cast<const char*>(b.data() + 17), static_cast<std::size_t>(n));
-    const auto meta = nlohmann::json::parse(jsonText, nullptr, false);
-    std::cout << "  metadata (" << n << " bytes):\n";
-    if (meta.is_discarded()) std::cout << "    <invalid JSON>\n";
-    else                     std::cout << meta.dump(2) << "\n";
-    std::cout << "  cbor uncompressed size: " << le32(b, o) << "\n"
-              << "  container version:      " << le32(b, o + 4) << (le32(b, o + 4) == 2 ? "" : "  (expected 2)") << "\n"
-              << "  zstd payload:           " << (b.size() - o - 8) << " bytes\n";
-    return !meta.is_discarded();
+    std::cout << "  container version: " << file->version << "\n  metadata:\n" << file->meta.dump(2) << "\n";
+    for (const auto& w : file->warnings) std::cout << "  warning: " << w << "\n";
+    if (full) {
+        std::cout << "  cbor:\n" << summarizeBinary(file->root).dump(2) << "\n";
+        return true;
+    }
+    if (!file->root.is_object()) {
+        std::cout << "  cbor root is not a map\n";
+        return true;
+    }
+    std::cout << "  modules (" << file->root.size() << "):\n";
+    for (const auto& [module, body] : file->root.items()) {
+        std::cout << "    " << module;
+        if (!body.is_object()) { std::cout << " = " << summarizeBinary(body).dump() << "\n"; continue; }
+        const auto params = body.find("plainParams");
+        if (params != body.end() && params->is_string()) std::cout << "  plainParams: " << params->get<std::string>();
+        std::cout << "\n";
+        if (params != body.end() && params->is_object())
+            for (const auto& [k, v] : params->items()) std::cout << "      " << k << " = " << v.dump() << "\n";
+        for (const auto& [k, v] : body.items())
+            if (k != "plainParams") std::cout << "      [" << k << "] " << summarizeBinary(v).dump() << "\n";
+    }
+    return true;
 }
 
-bool dumpFxp(const Bytes& b, bool bank)
+bool dumpFxp(const Bytes& b)
 {
-    if (b.size() < 60) {
-        std::cout << "  truncated VST2 header\n";
+    std::string error;
+    const auto file = FxpFile::read(b, error);
+    if (!file) {
+        std::cout << "  error: " << error << "\n";
         return false;
     }
-    std::cout << "  byteSize:   " << be32(b, 4) << "\n"
-              << "  chunkMagic: " << tag(b, 8) << "\n"
-              << "  version:    " << be32(b, 12) << "\n"
-              << "  fxID:       " << tag(b, 16) << (tag(b, 16) == "XfsX" ? "  (Serum)" : "") << "\n"
-              << "  fxVersion:  " << be32(b, 20) << "\n";
-    if (bank) {
-        std::cout << "  numPrograms: " << be32(b, 24) << "\n";
-    } else {
-        std::cout << "  numParams:  " << be32(b, 24) << "\n"
-                  << "  prgName:    \"" << fixedString(b, 28, 28) << "\"\n"
-                  << "  chunkSize:  " << be32(b, 56) << "\n";
+    if (file->isBank) std::cout << "  bank with " << file->programs.size() << " program(s)\n";
+    for (std::size_t i = 0; i < file->programs.size(); ++i) {
+        const auto& p = file->programs[i];
+        std::cout << "  program " << i << ": fxID " << p.fxId << (p.isSerum() ? " (Serum)" : "") << "\n"
+                  << "    header name: \"" << p.headerName << "\"\n"
+                  << "    name:        \"" << p.name << "\"\n"
+                  << "    author:      \"" << p.author << "\"\n"
+                  << "    category:    \"" << p.category << "\"\n"
+                  << "    version:     " << p.stateVersion << "\n"
+                  << "    state:       " << p.originalStateSize << " bytes (padded to " << p.state.size() << ")\n";
+        for (std::size_t s = 0; s < p.extraStreams.size(); ++s)
+            std::cout << "    stream " << (s + 1) << ":    " << p.extraStreams[s].size() << " bytes\n";
+        if (!p.params.empty()) {
+            std::cout << "    params (INFERRED layout @0x3460):";
+            for (std::size_t k = 0; k < p.params.size(); ++k) std::cout << (k % 10 == 0 ? "\n      " : " ") << p.params[k];
+            std::cout << "\n";
+        }
+        for (const auto& w : p.warnings) std::cout << "    warning: " << w << "\n";
     }
+    return true;
+}
+
+bool dumpWavetable(const Bytes& b)
+{
+    std::string error;
+    const auto wt = Wavetable::read(b, error);
+    if (!wt) return false;
+    std::cout << "  wavetable: " << wt->frameCount << " frame(s) x " << wt->frameSize << " samples"
+              << (wt->hadClm ? ", clm chunk, morph mode " + std::to_string(wt->morphMode) : ", no clm chunk") << "\n";
     return true;
 }
 
@@ -92,34 +124,40 @@ bool dumpFxp(const Bytes& b, bool bank)
 
 int main(int argc, char** argv)
 {
-    if (argc < 2) {
-        std::cerr << "usage: preset_dump <file>...\n";
+    bool full = false;
+    std::vector<std::string> files;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--full") == 0) full = true;
+        else files.emplace_back(argv[i]);
+    }
+    if (files.empty()) {
+        std::cerr << "usage: preset_dump [--full] <file>...\n";
         return 2;
     }
     int failures = 0;
-    for (int i = 1; i < argc; ++i) {
-        std::ifstream in(argv[i], std::ios::binary);
+    for (const auto& path : files) {
+        std::ifstream in(path, std::ios::binary);
         if (!in) {
-            std::cerr << argv[i] << ": cannot open\n";
+            std::cerr << path << ": cannot open\n";
             ++failures;
             continue;
         }
         const Bytes bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        const auto format = winerose::detectPresetFormat(bytes);
-        std::cout << argv[i] << ": " << winerose::presetFormatName(format) << " (" << bytes.size() << " bytes)\n";
+        const auto format = detectPresetFormat(bytes);
+        std::cout << path << ": " << presetFormatName(format) << " (" << bytes.size() << " bytes)\n";
 
         bool ok = true;
         switch (format) {
-            case winerose::PresetFormat::WineroseState: {
+            case PresetFormat::WineroseState: {
                 const auto doc = nlohmann::json::parse(bytes.begin(), bytes.end(), nullptr, false);
                 ok = !doc.is_discarded();
                 if (ok) std::cout << doc.dump(2) << "\n";
                 break;
             }
-            case winerose::PresetFormat::SerumPreset: ok = dumpSerumPreset(bytes); break;
-            case winerose::PresetFormat::SerumFxp:    ok = dumpFxp(bytes, false); break;
-            case winerose::PresetFormat::SerumFxb:    ok = dumpFxp(bytes, true); break;
-            case winerose::PresetFormat::Unknown:     ok = false; break;
+            case PresetFormat::SerumPreset: ok = dumpSerumPreset(bytes, full); break;
+            case PresetFormat::SerumFxp:
+            case PresetFormat::SerumFxb:    ok = dumpFxp(bytes); break;
+            case PresetFormat::Unknown:     ok = dumpWavetable(bytes); break;
         }
         if (!ok) ++failures;
     }

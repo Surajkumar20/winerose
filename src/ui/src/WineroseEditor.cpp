@@ -23,6 +23,19 @@ WineroseEditor::WineroseEditor(juce::AudioProcessor& processor, control::IContro
     addAndMakeVisible(m_undo);
     addAndMakeVisible(m_redo);
 
+    m_load.onClick = [this] {
+        m_chooser = std::make_unique<juce::FileChooser>("Load a preset", juce::File(), "*.SerumPreset;*.fxp;*.fxb;*.json;*.wav");
+        m_chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                               [this](const juce::FileChooser& fc) {
+                                   if (fc.getResult().existsAsFile()) loadFile(fc.getResult());
+                               });
+    };
+    addAndMakeVisible(m_load);
+    m_status.setColour(juce::Label::textColourId, juce::Colour(0xffc9b8c4));
+    m_status.setFont(juce::FontOptions(13.0f));
+    m_status.setMinimumHorizontalScale(0.6f);
+    addAndMakeVisible(m_status);
+
     m_viewport.setViewedComponent(&m_content, false);
     m_viewport.setScrollBarsShown(true, false);
     m_viewport.setScrollBarThickness(kScrollbar);
@@ -164,6 +177,35 @@ void WineroseEditor::refreshAll()
     m_redo.setEnabled(m_controller.canRedo());
 }
 
+bool WineroseEditor::isInterestedInFileDrag(const juce::StringArray& files)
+{
+    for (const auto& f : files)
+        if (f.endsWithIgnoreCase(".SerumPreset") || f.endsWithIgnoreCase(".fxp") || f.endsWithIgnoreCase(".fxb")
+            || f.endsWithIgnoreCase(".json") || f.endsWithIgnoreCase(".wav"))
+            return true;
+    return false;
+}
+
+void WineroseEditor::filesDropped(const juce::StringArray& files, int, int)
+{
+    if (!files.isEmpty()) loadFile(juce::File(files[0]));
+}
+
+void WineroseEditor::loadFile(const juce::File& file)
+{
+    juce::MemoryBlock data;
+    if (!file.loadFileAsData(data)) {
+        m_status.setText("Cannot read " + file.getFileName(), juce::dontSendNotification);
+        return;
+    }
+    const auto result = m_controller.loadPreset(std::span<const std::uint8_t>(static_cast<const std::uint8_t*>(data.getData()), data.getSize()));
+    m_status.setText(result.ok ? juce::String(result.message.empty() ? "Loaded " + file.getFileName().toStdString() : result.message)
+                               : juce::String("Could not load " + file.getFileName().toStdString() + ": " + result.error),
+                     juce::dontSendNotification);
+    m_status.setTooltip(m_status.getText());
+    refreshAll();
+}
+
 void WineroseEditor::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colour(0xff1b1520));
@@ -178,7 +220,11 @@ void WineroseEditor::resized()
     m_redo.setBounds(header.removeFromRight(64));
     header.removeFromRight(8);
     m_undo.setBounds(header.removeFromRight(64));
-    m_title.setBounds(header);
+    header.removeFromRight(8);
+    m_load.setBounds(header.removeFromRight(120));
+    header.removeFromRight(12);
+    m_title.setBounds(header.removeFromLeft(130));
+    m_status.setBounds(header);
 
     m_viewport.setBounds(getLocalBounds().withTrimmedTop(kHeader));
     layoutRows();

@@ -8,6 +8,30 @@ FetchContent_Declare(nlohmann_json
     URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz)
 FetchContent_MakeAvailable(nlohmann_json)
 
+# Preset containers (feature/presets): zstd for .SerumPreset payloads, zlib for Serum 1 .fxp state streams.
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED   OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC   ON  CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(zstd
+    GIT_REPOSITORY https://github.com/facebook/zstd.git
+    GIT_TAG        v1.5.7
+    GIT_SHALLOW    TRUE
+    SOURCE_SUBDIR  build/cmake)
+FetchContent_MakeAvailable(zstd)
+
+# zlib's CMakeLists predates CMake 3.5; CMake 4 refuses such projects unless given a policy floor.
+set(_winerose_saved_policy_min "${CMAKE_POLICY_VERSION_MINIMUM}")
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(zlib
+    GIT_REPOSITORY https://github.com/madler/zlib.git
+    GIT_TAG        v1.3.2
+    GIT_SHALLOW    TRUE)
+FetchContent_MakeAvailable(zlib)
+set(CMAKE_POLICY_VERSION_MINIMUM "${_winerose_saved_policy_min}")
+
 if(WINEROSE_BUILD_PLUGIN)
     FetchContent_Declare(JUCE
         GIT_REPOSITORY https://github.com/juce-framework/JUCE.git

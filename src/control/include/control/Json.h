@@ -72,7 +72,7 @@ inline void from_json(const nlohmann::json& j, ParamChange& c)
 
 inline void to_json(nlohmann::json& j, const Result& r)
 {
-    j = nlohmann::json{{"ok", r.ok}, {"error", r.error}};
+    j = nlohmann::json{{"ok", r.ok}, {"error", r.error}, {"message", r.message}};
 }
 
 inline void to_json(nlohmann::json& j, const MeterSnapshot& m)

@@ -5,6 +5,7 @@
 #include "params/ConfigManager.h"
 #include "params/ParamRegistry.h"
 #include "presets/PresetFormat.h"
+#include "presets/SerumImport.h"
 
 #include <array>
 #include <cstdlib>
@@ -258,6 +259,8 @@ Result Controller::loadState(const std::string& state)
     const auto registries = m_config->getAttachedParamRegistries();
     m_config->beginBatch();
     for (const auto& [name, reg] : registries) reg->resetToDefaults();
+    m_config->erasePrefix("Serum2.");   // values preserved from an earlier import; the state re-adds its own
+    m_config->erasePrefix("Serum1.");
     m_config->restore(state);
     for (const auto& [name, reg] : registries)
         for (const auto& def : reg->getAll()) reg->clampAndApply(def);
@@ -270,17 +273,41 @@ Result Controller::loadState(const std::string& state)
 Result Controller::loadPreset(std::span<const std::uint8_t> bytes)
 {
     const auto format = detectPresetFormat(bytes);
-    switch (format) {
-        case PresetFormat::WineroseState:
-            return loadState(std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
-        case PresetFormat::SerumPreset:
-        case PresetFormat::SerumFxp:
-        case PresetFormat::SerumFxb:
-            return Result::failure(std::string(presetFormatName(format)) + " import is not implemented yet (feature/presets)");
-        case PresetFormat::Unknown:
-            break;
+    if (format == PresetFormat::WineroseState)
+        return loadState(std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+
+    // A bare wavetable: load it onto oscillator A (a common drag-and-drop case).
+    if (format == PresetFormat::Unknown) {
+        std::string error;
+        if (auto wt = presets::Wavetable::read(bytes, error)) {
+            m_engine.setOscillatorTable(0, dsp::WavetableBank::build(wt->samples, wt->frameSize, "Imported"));
+            return Result::success("Loaded a " + std::to_string(wt->frameCount) + "-frame wavetable on oscillator A");
+        }
+        return Result::failure("unrecognized preset format");
     }
-    return Result::failure("unrecognized preset format");
+
+    // Serum presets: decode first (nothing changes if the file is unreadable), then map in one batch.
+    std::string error;
+    std::optional<presets::SerumPresetFile> serum2;
+    std::optional<presets::FxpFile> serum1;
+    if (format == PresetFormat::SerumPreset) serum2 = presets::SerumPresetFile::read(bytes, error);
+    else                                     serum1 = presets::FxpFile::read(bytes, error);
+    if (!serum2 && !serum1) return Result::failure(std::string(presetFormatName(format)) + ": " + error);
+
+    presets::SerumImporter importer(m_config, m_assetRoots);
+    m_config->beginBatch();
+    for (const auto& [name, reg] : m_config->getAttachedParamRegistries()) reg->resetToDefaults();
+    const presets::ImportReport report = serum2 ? importer.importSerum2(*serum2) : importer.importSerum1(serum1->programs.front());
+    m_config->endBatch();
+
+    for (const auto& w : report.wavetables)
+        m_engine.setOscillatorTable(w.oscillator, dsp::WavetableBank::build(w.table.samples, w.table.frameSize, w.table.name));
+    m_history.clear();
+    m_lastImport = report.toJson();
+    std::string summary = report.summary();
+    if (serum1 && serum1->programs.size() > 1)
+        summary += " (bank with " + std::to_string(serum1->programs.size()) + " programs: loaded the first)";
+    return Result::success(summary);
 }
 
 // --- Undo -------------------------------------------------------------------------------------------

@@ -42,6 +42,15 @@ WineroseProcessor::WineroseProcessor()
     }
     m_hostSync = std::make_unique<HostSync>(*this, *m_config, std::move(exposed));
     m_controller->setGestureSink(m_hostSync.get());
+
+    // Where imported Serum presets usually reference their wavetables from (the user's own content folders).
+    {
+        const auto docs = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+        std::vector<std::filesystem::path> roots;
+        for (const char* sub : {"Xfer/Serum 2 Presets", "Xfer/Serum Presets", "Winerose/Tables"})
+            roots.emplace_back(docs.getChildFile(sub).getFullPathName().toStdString());
+        m_controller->setAssetSearchPaths(std::move(roots));
+    }
 }
 
 WineroseProcessor::~WineroseProcessor()

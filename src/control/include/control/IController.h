@@ -77,8 +77,11 @@ public:
     // --- State / presets ---
     virtual std::string saveState() const = 0;                       // own format (JSON)
     virtual Result      loadState(const std::string& state) = 0;
-    /** Any supported preset container (own format today; .SerumPreset / .fxp in feature/presets). */
+    /** Any supported preset container: Winerose state, .SerumPreset, .fxp/.fxb, or a wavetable .wav (loaded
+     *  onto oscillator A). On success Result::message summarizes how faithful a Serum import was. */
     virtual Result      loadPreset(std::span<const std::uint8_t> bytes) = 0;
+    /** JSON report of the last Serum import (mapped / unmapped keys, wavetables, warnings); "{}" if none. */
+    virtual std::string importReport() const = 0;
 
     // --- Undo ---
     virtual bool undo() = 0;

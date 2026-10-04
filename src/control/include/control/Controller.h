@@ -5,8 +5,10 @@
 
 #include "params/ParamListener.h"
 
+#include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace winerose {
 class ConfigManager;
@@ -35,6 +37,9 @@ public:
     /** The host adapter's gesture receiver (may be null, e.g. headless tests). Not owned. */
     void setGestureSink(IGestureSink* sink) { m_gestureSink = sink; }
 
+    /** Folders searched for wavetables referenced by imported presets (Serum content folders). */
+    void setAssetSearchPaths(std::vector<std::filesystem::path> paths) { m_assetRoots = std::move(paths); }
+
     // IController
     std::vector<ParamSchema> schema() const override;
     ParamValue  get(std::string_view nsKey) const override;
@@ -49,6 +54,7 @@ public:
     std::string saveState() const override;
     Result      loadState(const std::string& state) override;
     Result      loadPreset(std::span<const std::uint8_t> bytes) override;
+    std::string importReport() const override { return m_lastImport; }
     bool        undo() override;
     bool        redo() override;
     bool        canUndo() const override { return m_history.canUndo(); }
@@ -72,6 +78,8 @@ private:
     IGestureSink*                  m_gestureSink = nullptr;
     EditHistory                    m_history;
     std::shared_ptr<Subscribers>   m_subscribers;   // shared so a Subscription outliving us is harmless
+    std::vector<std::filesystem::path> m_assetRoots;
+    std::string                    m_lastImport = "{}";
 };
 
 } // namespace winerose::control

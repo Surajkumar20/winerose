@@ -55,9 +55,10 @@ struct ParamChange {
 struct Result {
     bool        ok = true;
     std::string error;
+    std::string message;   // human-readable summary on success (e.g. a preset import report)
 
-    static Result success() { return {}; }
-    static Result failure(std::string message) { return {false, std::move(message)}; }
+    static Result success(std::string info = {}) { return {true, {}, std::move(info)}; }
+    static Result failure(std::string why) { return {false, std::move(why), {}}; }
 };
 
 struct MeterSnapshot {

@@ -164,9 +164,10 @@ TEST_CASE("loadPreset routes by container format", "[control]")
 
     std::vector<std::uint8_t> serum = {'X','f','e','r','J','s','o','n','\0'};
     serum.resize(64, 0);
-    const auto r = f.ctl.loadPreset(serum);
+    const auto r = f.ctl.loadPreset(serum);   // magic but no real payload: decoding fails, patch unchanged
     CHECK_FALSE(r.ok);
-    CHECK(r.error.find("feature/presets") != std::string::npos);
+    CHECK(r.error.find(".SerumPreset") != std::string::npos);
+    CHECK(f.ctl.get("Global.masterVolume").number() == Approx(0.2));
 }
 
 TEST_CASE("schema defaults decode enum labels, not just numbers", "[control]")

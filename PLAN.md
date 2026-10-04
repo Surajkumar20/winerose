@@ -570,3 +570,31 @@ Where the code differs from, or adds detail to, the sections above:
   - Per-type parameter names in the generic editor (`fx::paramNames()` exists for feature/UI).
   - Resetting p0..p7 to the type's defaults when a user picks a new type. That is UI policy: the engine must not
     do it, or preset loads would be overwritten.
+
+---
+
+## 9. As built on `feature/presets`
+
+### Phase 6 (SPEC §5.4/§5.6): structurally done; parameter mapping awaits measurement
+
+`master` was fast-forwarded to `feature/audio_engine` (da1296b) first, so presets build on the real registries.
+
+| Piece | Where | Status |
+|---|---|---|
+| `.SerumPreset` reader/writer: `XferJson\0` + u64 + JSON + u32 size + u32 version + zstd(CBOR) | `presets/SerumPresetFile` | Container VERIFIED (public, several independent tools). CBOR byte strings kept as JSON binary. Writer is for tests only. |
+| `.fxp`/`.fxb` reader: VST2 header, zlib state #0 padded to 172,736 B, extra streams, name/author/category/version offsets | `presets/FxpFile` | Header + metadata offsets from SPEC §2.2. Parameter array @0x3460 is INFERRED (low-reputation source). |
+| Wavetable `.wav` read/write, `clm ` chunk (`<!>2048 01000000`), PCM 8/16/24/32 + float 32/64, any channels | `presets/WavetableWav` | Writes mono float32 with the factory flag 0. |
+| Mapping tables with VERIFIED/INFERRED/TODO-MEASURE status | `presets/SerumTables.h` | `kExplicit` empty; `kSynonyms` = name guesses per module family. |
+| Importer: reset → map → preserve unknown keys as `Serum2.<module>.<key>` / `Serum1.param<N>` → report | `presets/SerumImport` | Lossless: import → save → load gives an identical patch (tested). |
+| AssetResolver: absolute → root/path → root/filename → bounded recursive search | `SerumImporter::resolveAsset` | Plugin roots: `Documents/Xfer/Serum 2 Presets`, `Documents/Xfer/Serum Presets`, `Documents/Winerose/Tables`. |
+| `IController::loadPreset` for all formats (+ bare `.wav` → osc A); `importReport()` JSON; `Result::message` | `control/Controller` | Decoding happens before any change; mapping is one batch; undo history cleared. |
+| `ConfigManager::erasePrefix` | `params` | Drops the previous import's preserved keys (import and loadState). |
+| `preset_dump [--full]` | `tools/preset_dump` | Prints the decoded module map — the way to learn real key names from presets you own. |
+| Editor: "Load preset..." + drag-and-drop, import summary in the header | `ui/WineroseEditor` | Stopgap until the feature/UI browser. |
+
+Dependencies: zstd v1.5.7 (`libzstd_static`), zlib v1.3.2 (`ZLIB::ZLIBSTATIC`, configured with `CMAKE_POLICY_VERSION_MINIMUM 3.5` for CMake 4), both PRIVATE to `winerose_presets`.
+
+**Why the mapping is not "done":** Serum 2's `kParam*` names, value curves and menu orders are not published; the only public tables are in a GPL-3.0 project (off-limits for this clean-room build). Two ways forward, both additive (rows in `kExplicit`, no code changes):
+1. `preset_dump` on presets the user owns shows the real key names and value ranges (no Serum install needed).
+2. `measure_host` against a licensed, installed Serum 2 measures curves and enum orders (VERIFIED rows).
+Until then imports keep everything, map what the name guesses catch, and say so in the report.
