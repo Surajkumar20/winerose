@@ -2,6 +2,9 @@
 
 #include "engine/EngineTypes.h"
 #include "engine/Smoother.h"
+#include "engine/dsp/WavetableBank.h"
+#include "engine/modules/Modules.h"
+#include "engine/voice/VoiceManager.h"
 
 #include "params/ConfigManager.h"
 #include "params/ParamHandle.h"
@@ -19,23 +22,29 @@ namespace global_keys {
 inline constexpr const char* module       = "Global";
 inline constexpr const char* masterVolume = "masterVolume";
 inline constexpr const char* quality      = "quality";
+inline constexpr const char* polyphony    = "polyphony";
 }
 
 enum class Quality { Good = 0, High = 1, Ultra = 2 };
 
 // Immutable non-automatable engine state, rebuilt on the message thread and adopted by the audio
-// thread at block start (SPEC §5.3). Grows as modules add wavetables, curves, matrix topology, ...
+// thread at block start (SPEC §5.3). Voices read tables through the CURRENT snapshot every block and never
+// cache them, so a retired snapshot's tables are never touched after it is swapped out.
 struct EngineSnapshot {
-    std::uint64_t revision = 0;
+    std::uint64_t                              revision = 0;
+    std::shared_ptr<const dsp::WavetableBank>  oscTable;   // Oscillator0 (A)
 };
 
 /**
  * @class Engine
  * @brief The synth. JUCE-free; driven through POD types by whichever host adapter owns it (PLAN.md §1.3).
  *
- * Construction registers every module's ParamRegistry on the given ConfigManager, so the complete
- * parameter set exists before any host asks for it. This branch's engine is a stub: it registers the
- * Global module and renders silence through the smoothed master volume.
+ * Phase 1 (SPEC §5.4): one wavetable oscillator (Oscillator0) with mipmapped tables, the SVF low-pass
+ * (Filter0), the amp envelope (Env0) and a 64-voice pool (polyphony default 16).
+ *
+ * Block-size independence: process() splits the host block into chunks that end at MIDI events and at
+ * every kControlBlock-sample boundary of the ABSOLUTE sample count. Parameters are read and control values
+ * recomputed only on those boundaries, so the output is identical whatever block sizes the host uses.
  */
 class Engine {
 public:
@@ -45,10 +54,10 @@ public:
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
 
-    /** Non-realtime. Allocates; resolves ParamHandles. May be called again with new settings. */
+    /** Non-realtime. Resets voices and the sample clock. */
     void prepare(double sampleRate, int maxBlockSize);
 
-    /** Realtime. numSamples must be <= the maxBlockSize given to prepare(). Events sorted by offset. */
+    /** Realtime. Any numSamples >= 0. Events must be sorted by sampleOffset (relative to this block). */
     void process(float* const* out, int numChannels, int numSamples,
                  const MidiEvent* events, int numEvents,
                  const TransportInfo& transport) noexcept;
@@ -62,21 +71,37 @@ public:
     /** Message thread: rebuild + publish the EngineSnapshot (on batch end / structural edits). */
     void publishSnapshot();
 
+    /** Message thread: replace Oscillator0's wavetable (takes effect at the next block). */
+    void setOscillatorTable(std::shared_ptr<const dsp::WavetableBank> table);
+
     const MeterState& meters() const noexcept { return m_meters; }
     int    maxBlockSize() const noexcept { return m_maxBlockSize; }
     double sampleRate() const noexcept { return m_sampleRate; }
+    int    activeVoiceCount() const noexcept { return m_voices.activeCount(); }
 
     std::shared_ptr<ConfigManager> configManager() const { return m_config; }
 
 private:
+    void controlTick() noexcept;
+    void handleMidi(const MidiEvent& e) noexcept;
+
     std::shared_ptr<ConfigManager> m_config;
     std::unique_ptr<ParamRegistry> m_global;
+    modules::OscillatorModule      m_osc0;
+    modules::FilterModule          m_filter0;
+    modules::EnvelopeModule        m_env0;
 
-    ParamHandle    m_masterVolume;
-    LinearSmoother m_volumeSmoother;
+    ParamHandle    m_masterVolume, m_polyphony;
+    LinearSmoother m_masterGain;
 
-    SnapshotExchange<EngineSnapshot> m_snapshots;
-    std::uint64_t                    m_snapshotRevision = 0;
+    voice::VoiceManager  m_voices;
+    voice::VoiceControl  m_control;
+    int                  m_polyphonyLimit = 16;
+    std::uint64_t        m_sampleClock = 0;
+
+    std::shared_ptr<const dsp::WavetableBank> m_oscTable;   // message-thread copy; published via snapshot
+    SnapshotExchange<EngineSnapshot>          m_snapshots;
+    std::uint64_t                             m_snapshotRevision = 0;
 
     MeterState m_meters;
     double     m_sampleRate   = 44100.0;

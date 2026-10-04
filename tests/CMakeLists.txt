@@ -14,6 +14,7 @@ add_executable(winerose_tests
     unit/test_snapshot_exchange.cpp
     unit/test_global_settings.cpp
     unit/test_engine.cpp
+    unit/test_dsp.cpp
     unit/test_controller.cpp
     unit/test_preset_format.cpp
     unit/test_vendored_libs.cpp)

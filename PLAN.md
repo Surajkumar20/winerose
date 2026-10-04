@@ -357,3 +357,32 @@ Where the code differs from, or adds detail to, the sections above:
 - **Portability check done locally:** every JUCE-free source compiles under GCC 13 with
   `-Wall -Wextra -Wpedantic` and no warnings. A full CMake+GCC build couldn't run on this machine (w64devkit
   links fail under CMake's compiler detection), so the Linux CI job is the real check.
+
+## 8. As built on `feature/audio_engine`
+
+### Phase 1 (SPEC §5.4): done
+
+- **Modules** (`src/engine/.../modules`). Each owns a `ParamRegistry` named after its Serum 2 CBOR module:
+  `Oscillator0` (enabled, level, pan, octave, semi, fine, wtPos, phase, random), `Filter0` (enabled,
+  cutoff [8.18 Hz–22.05 kHz, exp], resonance) and `Env0` (attack/hold/decay/release 0–32 s on a cubic knob,
+  sustain). `Global` adds `polyphony` (1–64, default 16). Defaults that still need measuring against Serum 2
+  are tagged TODO-MEASURE in their tooltips.
+- **DSP** (`dsp/`):
+  - `WavetableBank`: 11 FFT-mipmapped levels (pffft), DC removed, 4-point Hermite, smooth frame morph.
+  - `Svf`: TPT, Zavalishin/Simper.
+  - `Envelope`: SPEC curve formula; attack and release start from the current level.
+  - `RealFft`: wrapper over pffft.
+  - Built-in "Basic Shapes" table: saw, square, triangle, sine (original content).
+- **Level-selection deviation from SPEC §5.5:** `floor(log2(inc·2048)) + 1`, crossfading to the next level.
+  The SPEC formula would put partials up to an octave above Nyquist. Measured worst alias for a C8 saw at
+  48 kHz: **-147.6 dBFS** (criterion: < -90).
+- **Voices:** fixed 64-voice pool. Stealing order is oldest released voice, then oldest voice; steals and
+  retriggers don't click. Sustain pedal, CC120 and CC123 work. Velocity doesn't affect amplitude (Serum
+  default). Start phases come from a seeded generator, so renders are deterministic.
+- **Block-size independence:** `Engine::process` splits host blocks at MIDI events and at 32-sample
+  boundaries of the absolute sample clock. Parameters are read only on those boundaries. The golden test
+  confirms identical output for host blocks of 1–512 samples.
+- **Wavetables reach the audio thread only through `EngineSnapshot`** (`Engine::setOscillatorTable`).
+  Voices never cache table pointers across blocks.
+- **Verified:** 84/84 ctest, including pluginval strictness 10 on the sounding plugin. **Not yet measured:**
+  CPU, which is a Phase 2 criterion.

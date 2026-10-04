@@ -4,7 +4,7 @@
 //
 //   measure_host list  <plugin.vst3> [--out params.csv]
 //   measure_host sweep <plugin.vst3> [--steps 1025] [--match <substring>] [--out sweep.csv]
-//   measure_host state <plugin.vst3> --out state.bin [--set <index>=<normalized>]...
+//   measure_host state <plugin.vst3> --out state.bin [--set <index|id|name>=<normalized>]...
 //
 //   list   one row per parameter: index, id, name, default, steps, discrete, boolean, label
 //   sweep  for each parameter, getText() at <steps> evenly spaced normalized values (SPEC step 2)
@@ -28,7 +28,7 @@ int usage()
         "usage:\n"
         "  measure_host list  <plugin.vst3> [--out params.csv]\n"
         "  measure_host sweep <plugin.vst3> [--steps 1025] [--match <substring>] [--out sweep.csv]\n"
-        "  measure_host state <plugin.vst3> --out state.bin [--set <index>=<normalized>]...\n";
+        "  measure_host state <plugin.vst3> --out state.bin [--set <index|id|name>=<normalized>]...\n";
     return 2;
 }
 
@@ -116,13 +116,23 @@ int state(juce::AudioPluginInstance& plugin, const juce::String& outPath, const 
     if (outPath.isEmpty()) return usage();
     const auto& params = plugin.getParameters();
     for (const auto& s : sets) {
-        const int index = s.upToFirstOccurrenceOf("=", false, false).getIntValue();
-        const float value = s.fromFirstOccurrenceOf("=", false, false).getFloatValue();
-        if (!s.contains("=") || index < 0 || index >= params.size()) {
-            std::cerr << "measure_host: bad --set '" << s << "'\n";
+        // <target>=<normalized>, where target is a parameter index, its host ID, or its name.
+        const juce::String target = s.upToLastOccurrenceOf("=", false, false).trim();
+        const float value = s.fromLastOccurrenceOf("=", false, false).getFloatValue();
+        juce::AudioProcessorParameter* param = nullptr;
+        if (target.containsOnly("0123456789") && target.isNotEmpty()) {
+            const int index = target.getIntValue();
+            if (index >= 0 && index < params.size()) param = params[index];
+        }
+        for (auto* p : params) {
+            if (param != nullptr) break;
+            if (p->getName(256).equalsIgnoreCase(target) || parameterId(*p) == target) param = p;
+        }
+        if (!s.contains("=") || param == nullptr) {
+            std::cerr << "measure_host: bad --set '" << s << "' (use <index|id|name>=<0..1>)\n";
             return 2;
         }
-        params[index]->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, value));
+        param->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, value));
     }
 
     // VST3 processors pick up parameter changes inside process(): run a few silent blocks first.

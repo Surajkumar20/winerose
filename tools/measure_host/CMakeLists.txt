@@ -33,7 +33,7 @@ endif()
 if(WINEROSE_BUILD_TESTS)
     add_test(NAME tools.measure_host.state_winerose
         COMMAND measure_host state "$<TARGET_FILE_DIR:Winerose_VST3>/../../../Winerose.vst3"
-                --out "${CMAKE_CURRENT_BINARY_DIR}/state_test/winerose.bin" --set 0=0.25)
+                --out "${CMAKE_CURRENT_BINARY_DIR}/state_test/winerose.bin" --set "Global masterVolume=0.25")
     set_tests_properties(tools.measure_host.state_winerose PROPERTIES
         PASS_REGULAR_EXPRESSION "plugin component state"
         FIXTURES_SETUP measure_host_state)

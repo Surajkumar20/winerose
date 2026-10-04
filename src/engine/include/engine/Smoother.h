@@ -12,6 +12,9 @@ public:
         m_rampSamples = static_cast<int>(std::max(1.0, sampleRate * rampSeconds));
     }
 
+    /** Exact ramp length in samples (used for control-block ramps, which must not depend on rounding). */
+    void setRampSamples(int samples) noexcept { m_rampSamples = std::max(1, samples); }
+
     void reset(float value) noexcept
     {
         m_current = m_target = value;

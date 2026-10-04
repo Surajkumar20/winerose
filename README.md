@@ -73,7 +73,7 @@ $mh = ".\build\vs2026\tools\measure_host\measure_host_artefacts\Release\measure_
 $serum = "C:\Program Files\Common Files\VST3\Serum2.vst3"
 & $mh list  $serum --out measure\serum2_params.csv
 & $mh sweep $serum --steps 1025 --out measure\serum2_sweep.csv
-& $mh state $serum --set 12=0.5 --out measure\state_12.bin
+& $mh state $serum --set "<parameter name>=0.5" --out measure\state_a.bin   # name, host ID or index
 ```
 
 `state` writes the plugin's own state chunk, unwrapped from JUCE's host XML. To map state keys to
