@@ -3,9 +3,11 @@
 namespace winerose::ui {
 
 namespace {
-constexpr int kRowHeight = 32;
-constexpr int kHeader    = 56;
-constexpr int kMargin    = 16;
+constexpr int kRowHeight     = 30;
+constexpr int kSectionHeight = 34;
+constexpr int kHeader        = 56;
+constexpr int kMargin        = 16;
+constexpr int kScrollbar     = 12;
 }
 
 WineroseEditor::WineroseEditor(juce::AudioProcessor& processor, control::IController& controller)
@@ -21,6 +23,11 @@ WineroseEditor::WineroseEditor(juce::AudioProcessor& processor, control::IContro
     addAndMakeVisible(m_undo);
     addAndMakeVisible(m_redo);
 
+    m_viewport.setViewedComponent(&m_content, false);
+    m_viewport.setScrollBarsShown(true, false);
+    m_viewport.setScrollBarThickness(kScrollbar);
+    addAndMakeVisible(m_viewport);
+
     buildRows();
     refreshAll();
 
@@ -32,8 +39,8 @@ WineroseEditor::WineroseEditor(juce::AudioProcessor& processor, control::IContro
     });
 
     setResizable(true, true);
-    setResizeLimits(360, 160, 2000, 2000);
-    setSize(520, kHeader + kMargin + static_cast<int>(m_rows.size()) * kRowHeight + kMargin);
+    setResizeLimits(420, 240, 2400, 2400);
+    setSize(600, 760);
 }
 
 WineroseEditor::~WineroseEditor()
@@ -43,16 +50,26 @@ WineroseEditor::~WineroseEditor()
 
 void WineroseEditor::buildRows()
 {
+    std::string currentModule;
     for (auto& schema : m_controller.schema()) {
         auto row = std::make_unique<Row>();
         row->schema = std::move(schema);
         Row* r = row.get();
         const std::string nsKey = r->schema.nsKey;
 
+        if (r->schema.module != currentModule) {
+            currentModule = r->schema.module;
+            r->section = std::make_unique<juce::Label>();
+            r->section->setText(currentModule, juce::dontSendNotification);
+            r->section->setFont(juce::FontOptions(16.0f, juce::Font::bold));
+            r->section->setColour(juce::Label::textColourId, juce::Colour(0xffe8a0b8));
+            m_content.addAndMakeVisible(*r->section);
+        }
+
         r->label = std::make_unique<juce::Label>();
-        r->label->setText(r->schema.module + " / " + r->schema.key, juce::dontSendNotification);
+        r->label->setText(r->schema.key, juce::dontSendNotification);
         r->label->setTooltip(r->schema.tooltip);
-        addAndMakeVisible(*r->label);
+        m_content.addAndMakeVisible(*r->label);
 
         if (r->schema.type == "enum" || r->schema.type == "bool") {
             r->combo = std::make_unique<juce::ComboBox>();
@@ -61,15 +78,16 @@ void WineroseEditor::buildRows()
             r->combo->onChange = [this, r] {
                 commit(*r, control::ParamValue(static_cast<double>(r->combo->getSelectedId() - 1)));
             };
-            addAndMakeVisible(*r->combo);
+            m_content.addAndMakeVisible(*r->combo);
         } else if (r->schema.type == "string") {
             r->text = std::make_unique<juce::TextEditor>();
             r->text->onReturnKey = [this, r] { commit(*r, control::ParamValue(r->text->getText().toStdString())); };
             r->text->onFocusLost = r->text->onReturnKey;
-            addAndMakeVisible(*r->text);
+            m_content.addAndMakeVisible(*r->text);
         } else {
             r->slider = std::make_unique<juce::Slider>(juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight);
             r->slider->setRange(0.0, 1.0, 0.0);
+            r->slider->setScrollWheelEnabled(false);   // the wheel scrolls the list, not the knob under it
             r->slider->setDoubleClickReturnValue(true, m_controller.toNormalized(nsKey, r->schema.defaultValue.number()));
             r->slider->textFromValueFunction = [this, nsKey](double n) {
                 return juce::String(m_controller.format(nsKey, m_controller.fromNormalized(nsKey, n)));
@@ -83,7 +101,7 @@ void WineroseEditor::buildRows()
                 const double plain = m_controller.fromNormalized(r->schema.nsKey, r->slider->getValue());
                 commit(*r, control::ParamValue(plain));
             };
-            addAndMakeVisible(*r->slider);
+            m_content.addAndMakeVisible(*r->slider);
         }
         m_rows.push_back(std::move(row));
     }
@@ -146,14 +164,27 @@ void WineroseEditor::resized()
     m_undo.setBounds(header.removeFromRight(64));
     m_title.setBounds(header);
 
-    area.removeFromTop(kMargin);
+    m_viewport.setBounds(getLocalBounds().withTrimmedTop(kHeader));
+    layoutRows();
+}
+
+void WineroseEditor::layoutRows()
+{
+    const int width = m_viewport.getWidth() - kScrollbar;
+    int y = kMargin / 2;
     for (auto& r : m_rows) {
-        auto line = area.removeFromTop(kRowHeight).reduced(0, 3);
-        r->label->setBounds(line.removeFromLeft(180));
+        if (r->section) {
+            r->section->setBounds(kMargin, y + 6, width - 2 * kMargin, kSectionHeight - 6);
+            y += kSectionHeight;
+        }
+        auto line = juce::Rectangle<int>(kMargin, y, width - 2 * kMargin, kRowHeight).reduced(0, 3);
+        r->label->setBounds(line.removeFromLeft(160));
         if (r->slider) r->slider->setBounds(line);
-        if (r->combo)  r->combo->setBounds(line.removeFromLeft(180));
+        if (r->combo)  r->combo->setBounds(line.removeFromLeft(200));
         if (r->text)   r->text->setBounds(line);
+        y += kRowHeight;
     }
+    m_content.setSize(width, y + kMargin);
 }
 
 } // namespace winerose::ui

@@ -30,6 +30,7 @@ public:
 private:
     struct Row {
         control::ParamSchema              schema;
+        std::unique_ptr<juce::Label>      section;    // module header, on the first row of each module
         std::unique_ptr<juce::Label>      label;
         std::unique_ptr<juce::Slider>     slider;     // numeric params (value = normalized 0..1)
         std::unique_ptr<juce::ComboBox>   combo;      // enum / bool params
@@ -38,6 +39,7 @@ private:
     };
 
     void buildRows();
+    void layoutRows();
     void refresh(Row& row);
     void refreshAll();
     Row* findRow(const std::string& nsKey);
@@ -47,6 +49,8 @@ private:
     juce::Label           m_title;
     juce::TextButton      m_undo { "Undo" };
     juce::TextButton      m_redo { "Redo" };
+    juce::Viewport        m_viewport;
+    juce::Component       m_content;     // holds every row; scrolled by m_viewport
     std::vector<std::unique_ptr<Row>> m_rows;
     control::Subscription m_subscription;   // declared last: unsubscribes before rows are destroyed
 
