@@ -63,7 +63,11 @@ public:
     // --- Value math for drawing controls (curve-aware) ---
     virtual double toNormalized(std::string_view nsKey, double plain) const = 0;
     virtual double fromNormalized(std::string_view nsKey, double normalized) const = 0;
+    /** Display text for a value, e.g. "425 Hz", "High-pass" (FX slot knobs follow the slot's effect type). */
     virtual std::string format(std::string_view nsKey, double plain) const = 0;
+    /** Current display name of a parameter. Usually its key; for generic FX slot knobs (p0..p7) the name the
+     *  slot's current effect gives it, e.g. "Low Type". Re-read after the slot's type changes. */
+    virtual std::string label(std::string_view nsKey) const = 0;
 
     // --- Gestures: bracket a continuous edit (knob drag) so the host records one automation move
     //     and undo records one step. ---

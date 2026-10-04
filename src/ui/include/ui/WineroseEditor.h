@@ -42,6 +42,7 @@ private:
     void layoutRows();
     void refresh(Row& row);
     void refreshAll();
+    void refreshModule(const std::string& module);
     Row* findRow(const std::string& nsKey);
     void commit(Row& row, const control::ParamValue& value);
 

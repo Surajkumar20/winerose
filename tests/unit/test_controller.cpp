@@ -180,3 +180,35 @@ TEST_CASE("schema defaults decode enum labels, not just numbers", "[control]")
     REQUIRE(it != schema.end());
     CHECK(it->defaultValue.number() == 2.0);
 }
+
+TEST_CASE("FX slot knobs are labelled and formatted for the slot's effect", "[control][fx]")
+{
+    Fixture f;
+    CHECK(f.ctl.label("FXRack0Slot0.p0") == "p0 (unused)");          // type None
+    CHECK(f.ctl.set("FXRack0Slot0.type", 9.0));                       // EQ
+    CHECK(f.ctl.label("FXRack0Slot0.p0") == "Low Type");
+    CHECK(f.ctl.label("FXRack0Slot0.p4") == "High Type");
+    CHECK(f.ctl.format("FXRack0Slot0.p0", 0.0) == "Low Shelf");
+    CHECK(f.ctl.format("FXRack0Slot0.p0", 0.99) == "High-pass");
+    CHECK(f.ctl.format("FXRack0Slot0.p4", 0.99) == "Low-pass");
+    CHECK(f.ctl.format("FXRack0Slot0.p2", 0.5) == "+0.0 dB");
+    CHECK(f.ctl.format("FXRack0Slot0.p1", 1.0) == "2.00 kHz");
+    CHECK(f.ctl.label("Filter0.cutoff") == "cutoff");                 // ordinary params keep their key
+}
+
+TEST_CASE("choosing an FX type applies its defaults as one undo step; loading state does not", "[control][fx]")
+{
+    Fixture f;
+    f.ctl.set("FXRack0Slot0.p1", 0.123);
+    CHECK(f.ctl.set("FXRack0Slot0.type", 8.0));   // Reverb
+    CHECK(f.ctl.get("FXRack0Slot0.p1").number() == Approx(0.45));     // reverb's default decay knob
+    CHECK(f.ctl.format("FXRack0Slot0.p0", 0.0) == "Plate");
+    CHECK(f.ctl.undo());                           // type and knobs revert together
+    CHECK(f.ctl.get("FXRack0Slot0.type").number() == 0.0);
+    CHECK(f.ctl.get("FXRack0Slot0.p1").number() == Approx(0.123));
+
+    // A state that sets a type AND custom knobs keeps the custom knobs.
+    const std::string state = R"({"format":"winerose.state","version":1,"values":{"FXRack0Slot0.type":8,"FXRack0Slot0.p1":0.9}})";
+    REQUIRE(f.ctl.loadState(state).ok);
+    CHECK(f.ctl.get("FXRack0Slot0.p1").number() == Approx(0.9));
+}

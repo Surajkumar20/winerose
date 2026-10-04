@@ -34,6 +34,10 @@ WineroseEditor::WineroseEditor(juce::AudioProcessor& processor, control::IContro
     m_subscription = m_controller.onChange([this](const control::ParamChange& change) {
         if (change.everything) { refreshAll(); return; }
         if (auto* row = findRow(change.nsKey)) refresh(*row);
+        // A type change renames the module's generic knobs (FX slots): refresh its labels and readouts.
+        const auto dot = change.nsKey.find('.');
+        if (dot != std::string::npos && change.nsKey.compare(dot + 1, std::string::npos, "type") == 0)
+            refreshModule(change.nsKey.substr(0, dot));
         m_undo.setEnabled(m_controller.canUndo());
         m_redo.setEnabled(m_controller.canRedo());
     });
@@ -67,7 +71,7 @@ void WineroseEditor::buildRows()
         }
 
         r->label = std::make_unique<juce::Label>();
-        r->label->setText(r->schema.key, juce::dontSendNotification);
+        r->label->setText(m_controller.label(nsKey), juce::dontSendNotification);
         r->label->setTooltip(r->schema.tooltip);
         m_content.addAndMakeVisible(*r->label);
 
@@ -141,9 +145,21 @@ void WineroseEditor::refresh(Row& row)
     }
 }
 
+void WineroseEditor::refreshModule(const std::string& module)
+{
+    for (auto& r : m_rows) {
+        if (r->schema.module != module) continue;
+        r->label->setText(m_controller.label(r->schema.nsKey), juce::dontSendNotification);
+        refresh(*r);
+    }
+}
+
 void WineroseEditor::refreshAll()
 {
-    for (auto& r : m_rows) refresh(*r);
+    for (auto& r : m_rows) {
+        r->label->setText(m_controller.label(r->schema.nsKey), juce::dontSendNotification);
+        refresh(*r);
+    }
     m_undo.setEnabled(m_controller.canUndo());
     m_redo.setEnabled(m_controller.canRedo());
 }

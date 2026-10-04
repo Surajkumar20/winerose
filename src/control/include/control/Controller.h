@@ -43,6 +43,7 @@ public:
     double      toNormalized(std::string_view nsKey, double plain) const override;
     double      fromNormalized(std::string_view nsKey, double normalized) const override;
     std::string format(std::string_view nsKey, double plain) const override;
+    std::string label(std::string_view nsKey) const override;
     void        beginGesture(std::string_view nsKey) override;
     void        endGesture(std::string_view nsKey) override;
     std::string saveState() const override;

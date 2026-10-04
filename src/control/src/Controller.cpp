@@ -1,11 +1,14 @@
 #include "control/Controller.h"
 
 #include "engine/Engine.h"
+#include "engine/fx/Effect.h"
 #include "params/ConfigManager.h"
 #include "params/ParamRegistry.h"
 #include "presets/PresetFormat.h"
 
+#include <array>
 #include <cstdlib>
+#include <optional>
 #include <map>
 #include <mutex>
 
@@ -27,6 +30,25 @@ std::string unitOf(const ParamMeta& meta)
 {
     if (const auto* m = std::get_if<NumericMeta>(&meta)) return m->unit;
     return {};
+}
+
+// FX slot parameters ("FXRack<r>Slot<s>.p<i>" / ".type") are generic: their meaning depends on the slot's
+// current effect type. index = -1 for the type itself.
+struct FxRef {
+    std::string module;
+    int index = -1;
+};
+
+std::optional<FxRef> fxRef(std::string_view nsKey)
+{
+    const auto dot = nsKey.find('.');
+    if (dot == std::string_view::npos) return std::nullopt;
+    const std::string_view module = nsKey.substr(0, dot), key = nsKey.substr(dot + 1);
+    if (module.rfind("FXRack", 0) != 0 || module.find("Slot") == std::string_view::npos) return std::nullopt;
+    if (key == "type") return FxRef{std::string(module), -1};
+    if (key.size() == 2 && key[0] == 'p' && key[1] >= '0' && key[1] < '0' + fx::kParamCount)
+        return FxRef{std::string(module), key[1] - '0'};
+    return std::nullopt;
 }
 
 } // namespace
@@ -115,16 +137,31 @@ bool Controller::write(std::string_view nsKey, const ParamValue& value, bool rec
     if (!def) return false;
 
     const ParamValue before = get(nsKey);
+    const auto fx = fxRef(nsKey);
+    const bool fxTypeEdit = recordHistory && fx && fx->index < 0;
+    if (fxTypeEdit) m_history.beginGroup();   // the type and its default knobs undo as one step
+
+    bool ok = true;
     if (std::holds_alternative<StringMeta>(def->meta)) {
-        if (value.isNumber()) return false;
-        reg->set<std::string>(key, value.text());
+        if (value.isNumber()) ok = false;
+        else reg->set<std::string>(key, value.text());
     } else if (value.isNumber()) {
         reg->set<double>(key, value.number());
     } else if (!reg->modify(key, value.text())) {
-        return false;
+        ok = false;
     }
-    if (recordHistory) m_history.record({std::string(nsKey), before, get(nsKey)});
-    return true;
+    if (ok && recordHistory) m_history.record({std::string(nsKey), before, get(nsKey)});
+
+    // A user picking a new effect type gets that effect's default knob positions. This is the user-edit
+    // path only: state/preset loads go through loadState() and keep their stored values.
+    if (ok && fxTypeEdit && !(get(nsKey) == before)) {
+        const auto type = static_cast<fx::FxType>(reg->get<int>("type"));
+        const auto& defaults = fx::defaultParams(type);
+        for (int i = 0; i < fx::kParamCount; ++i)
+            write(fx->module + ".p" + std::to_string(i), ParamValue(static_cast<double>(defaults[static_cast<std::size_t>(i)])), true);
+    }
+    if (fxTypeEdit) m_history.endGroup();
+    return ok;
 }
 
 bool Controller::set(std::string_view nsKey, const ParamValue& value)
@@ -164,11 +201,30 @@ std::string Controller::format(std::string_view nsKey, double plain) const
     std::string key;
     auto* reg = resolve(nsKey, key);
     if (!reg) return {};
+    if (const auto fx = fxRef(nsKey); fx && fx->index >= 0) {
+        std::array<float, fx::kParamCount> values {};
+        for (int i = 0; i < fx::kParamCount; ++i) values[static_cast<std::size_t>(i)] = reg->get<float>("p" + std::to_string(i));
+        values[static_cast<std::size_t>(fx->index)] = static_cast<float>(plain);
+        return fx::formatParam(static_cast<fx::FxType>(reg->get<int>("type")), fx->index, values);
+    }
     const auto def = reg->find(key);
     if (!def) return {};
     std::string text = formatPlain(def->meta, plain);
     if (const auto unit = unitOf(def->meta); !unit.empty()) text += " " + unit;
     return text;
+}
+
+std::string Controller::label(std::string_view nsKey) const
+{
+    std::string key;
+    auto* reg = resolve(nsKey, key);
+    if (!reg) return {};
+    if (const auto fx = fxRef(nsKey); fx && fx->index >= 0) {
+        const auto type = static_cast<fx::FxType>(reg->get<int>("type"));
+        const char* name = fx::paramSpec(type, fx->index).name;
+        return (name != nullptr && name[0] != '\0') ? std::string(name) : key + " (unused)";
+    }
+    return key;
 }
 
 // --- Gestures ---------------------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 #include <array>
 #include <memory>
+#include <string>
 
 namespace winerose::fx {
 
@@ -37,6 +38,31 @@ constexpr int  splitterBands(FxType t) noexcept
 
 /** What each generic parameter means for a type (for UIs and tooltips); empty = unused. */
 const std::array<const char*, kParamCount>& paramNames(FxType type) noexcept;
+
+/**
+ * @brief How a generic 0..1 slot parameter maps to what it controls, so UIs can label and display it
+ *        ("High-pass", "120 Hz", "-6.0 dB"). Must mirror the effect's own setParams() mapping.
+ */
+struct ParamSpec {
+    enum class Kind : unsigned char {
+        Unused, Linear, Exponential, BipolarDb, Percent, Choice, Toggle,
+        UtilityGain, BodeShift, DelayTime, Ratio, FilterType, ExpOffLow, ExpOffHigh
+    };
+    const char* name = "";
+    Kind kind = Kind::Unused;
+    float lo = 0.0f, hi = 1.0f;          // range (Linear/Exponential/ExpOff*), ±range for BipolarDb
+    const char* unit = "";
+    const char* const* choices = nullptr; // Choice
+    int choiceCount = 0;
+};
+
+const ParamSpec& paramSpec(FxType type, int index) noexcept;
+
+/**
+ * @brief Display text for parameter `index` of a slot of `type`, given all eight values (some displays
+ *        depend on another parameter, e.g. the delay time on the sync switch).
+ */
+std::string formatParam(FxType type, int index, const std::array<float, kParamCount>& values);
 
 /** Default p0..p7 when a slot is switched to a type (applied by the UI / preset layer; engine reads values). */
 const std::array<float, kParamCount>& defaultParams(FxType type) noexcept;
