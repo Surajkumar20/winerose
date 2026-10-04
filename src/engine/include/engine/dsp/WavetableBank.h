@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <memory>
@@ -69,46 +70,78 @@ public:
                                 + static_cast<std::size_t>(frame)) * kStride + kGuardPre;
     }
 
+    /** Resolved frame position: the two adjacent frames and the morph fraction between them. */
+    struct FramePos {
+        int   f0 = 0, f1 = 0;
+        float ft = 0.0f;
+    };
+
+    /** framePos in [0, frameCount-1]; fractional = smooth morph between adjacent frames. */
+    FramePos resolveFrame(float framePos) const noexcept
+    {
+        FramePos fp;
+        fp.f0 = std::clamp(static_cast<int>(framePos), 0, m_frameCount - 1);
+        fp.f1 = std::min(fp.f0 + 1, m_frameCount - 1);
+        fp.ft = fp.f1 == fp.f0 ? 0.0f : framePos - static_cast<float>(fp.f0);
+        return fp;
+    }
+
     /**
-     * @brief Realtime read: phase in [0,1), framePos in [0, frameCount-1] (fractional = smooth morph between
-     *        adjacent frames), using a precomputed LevelChoice. 4-point Hermite within a frame.
+     * @brief Realtime read: phase in [0,1) at a resolved frame position, using a precomputed LevelChoice.
+     *
+     * Hermite interpolation is linear in its four input samples, so the frame morph and the mip-level
+     * crossfade are applied to the samples first and a single Hermite evaluated — identical to
+     * interpolating each table and mixing, at a quarter of the cost.
      */
+    float read(double phase, const FramePos& fp, LevelChoice lc) const noexcept
+    {
+        const float pos = static_cast<float>(phase * kFrameSize);
+        int         idx = static_cast<int>(pos);
+        const float t   = pos - static_cast<float>(idx);
+        if (idx >= kFrameSize) idx -= kFrameSize;   // phase == 1.0 (warps can land exactly on it) is phase 0
+        if (idx < 0) idx = 0;
+
+        // Scalar locals on purpose: small arrays here made MSVC bounce values through memory
+        // (store-forwarding stalls), tripling the cost of the level crossfade.
+        const float* a = frameData(lc.level, fp.f0) + idx;
+        float s0 = a[-1], s1 = a[0], s2 = a[1], s3 = a[2];
+        if (fp.ft > 0.0f) {
+            const float* b = frameData(lc.level, fp.f1) + idx;
+            s0 += (b[-1] - s0) * fp.ft;
+            s1 += (b[0]  - s1) * fp.ft;
+            s2 += (b[1]  - s2) * fp.ft;
+            s3 += (b[2]  - s3) * fp.ft;
+        }
+        if (lc.blend > 0.0f) {
+            const float* c = frameData(lc.level + 1, fp.f0) + idx;
+            float u0 = c[-1], u1 = c[0], u2 = c[1], u3 = c[2];
+            if (fp.ft > 0.0f) {
+                const float* d = frameData(lc.level + 1, fp.f1) + idx;
+                u0 += (d[-1] - u0) * fp.ft;
+                u1 += (d[0]  - u1) * fp.ft;
+                u2 += (d[1]  - u2) * fp.ft;
+                u3 += (d[2]  - u3) * fp.ft;
+            }
+            s0 += (u0 - s0) * lc.blend;
+            s1 += (u1 - s1) * lc.blend;
+            s2 += (u2 - s2) * lc.blend;
+            s3 += (u3 - s3) * lc.blend;
+        }
+        const float c1 = 0.5f * (s2 - s0);
+        const float c2 = s0 - 2.5f * s1 + 2.0f * s2 - 0.5f * s3;
+        const float c3 = 0.5f * (s3 - s0) + 1.5f * (s1 - s2);
+        return ((c3 * t + c2) * t + c1) * t + s1;
+    }
+
+    /** Convenience overload: resolves the frame position per call. */
     float read(double phase, float framePos, LevelChoice lc) const noexcept
     {
-        const float pos  = static_cast<float>(phase * kFrameSize);
-        const int   idx  = static_cast<int>(pos);
-        const float t    = pos - static_cast<float>(idx);
-        const int   f0   = std::min(static_cast<int>(framePos), m_frameCount - 1);
-        const int   f1   = std::min(f0 + 1, m_frameCount - 1);
-        const float ft   = framePos - static_cast<float>(f0);
-
-        float a = sampleLevel(lc.level, f0, f1, ft, idx, t);
-        if (lc.blend > 0.0f) {
-            const float b = sampleLevel(lc.level + 1, f0, f1, ft, idx, t);
-            a += (b - a) * lc.blend;
-        }
-        return a;
+        return read(phase, resolveFrame(framePos), lc);
     }
 
 private:
     WavetableBank() = default;
 
-    static float hermite(const float* x, int i, float t) noexcept
-    {
-        const float xm1 = x[i - 1], x0 = x[i], x1 = x[i + 1], x2 = x[i + 2];
-        const float c1 = 0.5f * (x1 - xm1);
-        const float c2 = xm1 - 2.5f * x0 + 2.0f * x1 - 0.5f * x2;
-        const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
-        return ((c3 * t + c2) * t + c1) * t + x0;
-    }
-
-    float sampleLevel(int level, int f0, int f1, float ft, int idx, float t) const noexcept
-    {
-        const float a = hermite(frameData(level, f0), idx, t);
-        if (f1 == f0 || ft <= 0.0f) return a;
-        const float b = hermite(frameData(level, f1), idx, t);
-        return a + (b - a) * ft;
-    }
 
     int                m_frameCount = 0;
     std::string        m_name;
@@ -117,5 +150,10 @@ private:
 
 /** The built-in "Basic Shapes" table: saw, square, triangle, sine (wtPos 0 = saw). Original content. */
 std::shared_ptr<const WavetableBank> makeBasicShapesTable();
+
+/** Sub oscillator shapes, one frame each, in SubShape order. Original content. */
+enum class SubShape : int { Sine = 0, RoundedRect, Triangle, Saw, Square, Pulse, Count };
+inline constexpr const char* kSubShapeNames[] = {"Sine", "Rounded Rect", "Triangle", "Saw", "Square", "Pulse"};
+std::shared_ptr<const WavetableBank> makeSubShapesTable();
 
 } // namespace winerose::dsp

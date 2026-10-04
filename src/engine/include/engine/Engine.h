@@ -11,6 +11,7 @@
 #include "params/ParamRegistry.h"
 #include "params/SnapshotExchange.h"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 
@@ -31,16 +32,19 @@ enum class Quality { Good = 0, High = 1, Ultra = 2 };
 // thread at block start (SPEC §5.3). Voices read tables through the CURRENT snapshot every block and never
 // cache them, so a retired snapshot's tables are never touched after it is swapped out.
 struct EngineSnapshot {
-    std::uint64_t                              revision = 0;
-    std::shared_ptr<const dsp::WavetableBank>  oscTable;   // Oscillator0 (A)
+    std::uint64_t revision = 0;
+    std::array<std::shared_ptr<const dsp::WavetableBank>, voice::kOscCount> oscTables;   // Oscillator0..2
+    std::shared_ptr<const dsp::WavetableBank> subTable;     // Oscillator4 shapes
+    std::shared_ptr<const dsp::NoiseTables>   noiseTables;  // Oscillator3 sources
 };
 
 /**
  * @class Engine
  * @brief The synth. JUCE-free; driven through POD types by whichever host adapter owns it (PLAN.md §1.3).
  *
- * Phase 1 (SPEC §5.4): one wavetable oscillator (Oscillator0) with mipmapped tables, the SVF low-pass
- * (Filter0), the amp envelope (Env0) and a 64-voice pool (polyphony default 16).
+ * Phases 1-2 (SPEC §5.4): wavetable oscillators A/B/C (Oscillator0..2: mipmapped tables, unison up to 16,
+ * dual warp), noise (Oscillator3) and sub (Oscillator4), the SVF low-pass (Filter0), the amp envelope (Env0),
+ * a 64-voice pool (polyphony default 16) and Quality-dependent oversampling of warped oscillators.
  *
  * Block-size independence: process() splits the host block into chunks that end at MIDI events and at
  * every kControlBlock-sample boundary of the ABSOLUTE sample count. Parameters are read and control values
@@ -71,8 +75,8 @@ public:
     /** Message thread: rebuild + publish the EngineSnapshot (on batch end / structural edits). */
     void publishSnapshot();
 
-    /** Message thread: replace Oscillator0's wavetable (takes effect at the next block). */
-    void setOscillatorTable(std::shared_ptr<const dsp::WavetableBank> table);
+    /** Message thread: replace oscillator A/B/C's (index 0..2) wavetable; takes effect at the next block. */
+    void setOscillatorTable(int index, std::shared_ptr<const dsp::WavetableBank> table);
 
     const MeterState& meters() const noexcept { return m_meters; }
     int    maxBlockSize() const noexcept { return m_maxBlockSize; }
@@ -87,11 +91,13 @@ private:
 
     std::shared_ptr<ConfigManager> m_config;
     std::unique_ptr<ParamRegistry> m_global;
-    modules::OscillatorModule      m_osc0;
+    std::array<std::unique_ptr<modules::OscillatorModule>, voice::kOscCount> m_osc;
+    modules::NoiseModule           m_noise;
+    modules::SubOscModule          m_sub;
     modules::FilterModule          m_filter0;
     modules::EnvelopeModule        m_env0;
 
-    ParamHandle    m_masterVolume, m_polyphony;
+    ParamHandle    m_masterVolume, m_polyphony, m_quality;
     LinearSmoother m_masterGain;
 
     voice::VoiceManager  m_voices;
@@ -99,7 +105,10 @@ private:
     int                  m_polyphonyLimit = 16;
     std::uint64_t        m_sampleClock = 0;
 
-    std::shared_ptr<const dsp::WavetableBank> m_oscTable;   // message-thread copy; published via snapshot
+    // Message-thread copies; published via the snapshot.
+    std::array<std::shared_ptr<const dsp::WavetableBank>, voice::kOscCount> m_oscTables;
+    std::shared_ptr<const dsp::WavetableBank> m_subTable;
+    std::shared_ptr<const dsp::NoiseTables>   m_noiseTables;
     SnapshotExchange<EngineSnapshot>          m_snapshots;
     std::uint64_t                             m_snapshotRevision = 0;
 

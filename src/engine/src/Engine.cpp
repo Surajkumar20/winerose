@@ -11,7 +11,11 @@ namespace winerose {
 Engine::Engine(std::shared_ptr<ConfigManager> config)
     : m_config(std::move(config))
     , m_global(std::make_unique<ParamRegistry>(m_config, global_keys::module))
-    , m_osc0(m_config, 0)
+    , m_osc { std::make_unique<modules::OscillatorModule>(m_config, 0),
+              std::make_unique<modules::OscillatorModule>(m_config, 1),
+              std::make_unique<modules::OscillatorModule>(m_config, 2) }
+    , m_noise(m_config)
+    , m_sub(m_config)
     , m_filter0(m_config, 0)
     , m_env0(m_config, 0)
 {
@@ -25,8 +29,12 @@ Engine::Engine(std::shared_ptr<ConfigManager> config)
                           "Maximum simultaneous notes");
     m_masterVolume = m_global->handle(global_keys::masterVolume);
     m_polyphony    = m_global->handle(global_keys::polyphony);
+    m_quality      = m_global->handle(global_keys::quality);
 
-    m_oscTable = dsp::makeBasicShapesTable();
+    const auto basic = dsp::makeBasicShapesTable();
+    m_oscTables   = {basic, basic, basic};
+    m_subTable    = dsp::makeSubShapesTable();
+    m_noiseTables = dsp::NoiseTables::make();
     publishSnapshot();
 }
 
@@ -47,7 +55,21 @@ void Engine::prepare(double sampleRate, int maxBlockSize)
 
 void Engine::controlTick() noexcept
 {
-    m_control.osc    = m_osc0.read();
+    bool warpWantsOversampling = false;
+    for (int o = 0; o < voice::kOscCount; ++o) {
+        auto& v = m_control.osc[static_cast<std::size_t>(o)];
+        v = m_osc[static_cast<std::size_t>(o)]->read();
+        if (v.enabled && (dsp::warpNeedsOversampling(v.warp1) || dsp::warpNeedsOversampling(v.warp2)))
+            warpWantsOversampling = true;
+    }
+    // Quality: Good = 1x, High = 2x, Ultra = 4x, applied only while a warp needs it (Serum 1 behaviour:
+    // "oversampling applied only to warps", SPEC §1.1). Factors INFERRED.
+    static constexpr int kFactor[] = {1, 2, 4};
+    const int quality = std::clamp(static_cast<int>(std::lround(m_quality.load())), 0, 2);
+    m_control.oversample = warpWantsOversampling ? kFactor[quality] : 1;
+
+    m_control.noise  = m_noise.read();
+    m_control.sub    = m_sub.read();
     m_control.filter = m_filter0.read();
     m_control.env    = m_env0.read();
     m_control.filterCoefs = dsp::Svf::compute(m_control.filter.cutoffHz, m_control.filter.resonance, m_sampleRate);
@@ -87,7 +109,13 @@ void Engine::process(float* const* out, int numChannels, int numSamples,
     realtime::Scope rt;
     ScopedFlushDenormals ftz;
     const EngineSnapshot* snapshot = m_snapshots.acquire();
-    const dsp::WavetableBank* table = snapshot != nullptr ? snapshot->oscTable.get() : nullptr;
+    voice::VoiceTables tables;
+    if (snapshot != nullptr) {
+        for (int o = 0; o < voice::kOscCount; ++o)
+            tables.osc[static_cast<std::size_t>(o)] = snapshot->oscTables[static_cast<std::size_t>(o)].get();
+        tables.sub   = snapshot->subTable.get();
+        tables.noise = snapshot->noiseTables.get();
+    }
 
     float peakL = 0.0f, peakR = 0.0f;
     float left[voice::kControlBlock], right[voice::kControlBlock];
@@ -105,7 +133,7 @@ void Engine::process(float* const* out, int numChannels, int numSamples,
 
         std::memset(left, 0, sizeof(float) * static_cast<std::size_t>(n));
         std::memset(right, 0, sizeof(float) * static_cast<std::size_t>(n));
-        m_voices.render(left, right, n, table);
+        m_voices.render(left, right, n, tables);
 
         for (int i = 0; i < n; ++i) {
             const float g = m_masterGain.next();
@@ -143,9 +171,10 @@ void Engine::reset() noexcept
     m_meters.peakRight.store(0.0f);
 }
 
-void Engine::setOscillatorTable(std::shared_ptr<const dsp::WavetableBank> table)
+void Engine::setOscillatorTable(int index, std::shared_ptr<const dsp::WavetableBank> table)
 {
-    m_oscTable = std::move(table);
+    if (index < 0 || index >= voice::kOscCount || table == nullptr) return;
+    m_oscTables[static_cast<std::size_t>(index)] = std::move(table);
     publishSnapshot();
 }
 
@@ -153,7 +182,9 @@ void Engine::publishSnapshot()
 {
     auto snapshot = std::make_unique<EngineSnapshot>();
     snapshot->revision = ++m_snapshotRevision;
-    snapshot->oscTable = m_oscTable;
+    snapshot->oscTables   = m_oscTables;
+    snapshot->subTable    = m_subTable;
+    snapshot->noiseTables = m_noiseTables;
     m_snapshots.publish(std::move(snapshot));
 }
 

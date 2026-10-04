@@ -386,3 +386,40 @@ Where the code differs from, or adds detail to, the sections above:
   Voices never cache table pointers across blocks.
 - **Verified:** 84/84 ctest, including pluginval strictness 10 on the sounding plugin. **Not yet measured:**
   CPU, which is a Phase 2 criterion.
+
+### Phase 2 (SPEC §5.4): done
+
+- **Oscillators:** A/B/C (`Oscillator0..2`, B and C off in the init patch), noise (`Oscillator3`: built-in
+  white/pink/brown loops, keytrack, pitch) and sub (`Oscillator4`: sine, rounded rect, triangle, saw,
+  square, pulse; octave). Each WT oscillator has its own table in the snapshot
+  (`Engine::setOscillatorTable(index, table)`).
+- **Unison (per oscillator, up to 16):**
+  - detune × range (0–48 st, default 2)
+  - tuning modes: Linear, Super ^1.3, Exp ^2, Inv ^0.5, Random (per note)
+  - blend: 0.75 = even; 0 = centre only; 1 = sides only; constant power
+  - width, stack (12 1x, 12 2x, +7, +7+12, centre -12/-24)
+  - span (WT-position spread), rand start (shared ↔ independent phases), warp spread
+  - Span and rand-start meanings are INFERRED; the stack order is TODO-MEASURE.
+- **Warps:** all Serum 1 modes from SPEC §1.2 plus FM from noise/sub, in two chained slots. FM/AM/RM take
+  the paired oscillator (A←B, B←A, C←A). Remap 1/2 use an identity curve until drawable curves land
+  (Phase 3). The menu order is TODO-MEASURE.
+- **Oscillator options:** smooth/stepped frame interpolation, start phase with 100% = Mem, random phase.
+- **Quality:** Good/High/Ultra = 1×/2×/4× oversampling of the oscillators, active only while a warp needs it,
+  decimated with HIIR (12 coefficients, transition 0.04). For a sync warp, Ultra measures 14 dB less aliasing
+  than Good. Hard-sync discontinuities limit what oversampling alone can do.
+- **Filter is stereo now** (unison width). Routing is still "everything through Filter0 when enabled" until
+  Phase 4.
+- **CPU (Release, MSVC 14.51, this machine):**
+
+  | Scenario | Load (% of one core) |
+  |---|---|
+  | 16 voices × 3 osc × 7 unison | **21.3%** (criterion < 25%) |
+  | + filter | 21.8% |
+  | + sync warp, Good | 32% |
+  | + sync warp, Ultra | 116% |
+  | 16 voices × 3 osc × 16 unison | 47% |
+
+  `tests/benchmark` asserts the criterion in optimized builds (ctest label `benchmark`).
+- **Performance note:** `WavetableBank::read` mixes frames and mip levels on the four input samples, then runs
+  one Hermite; this is exact because Hermite is linear in its samples. Keep its scalar locals: an array-based
+  version made MSVC stall on store forwarding and tripled the cost of the level crossfade.

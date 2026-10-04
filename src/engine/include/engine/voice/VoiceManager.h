@@ -13,7 +13,7 @@ namespace winerose::voice {
  *
  * Stealing order when the polyphony limit is reached: released voices first (oldest first), then the
  * oldest held voice. "Limit same note" is off, matching Serum 2's default.
- * Start phases come from phase + random·U[0,1) using a seeded generator, so renders are deterministic.
+ * Random start phases / detunes come from a generator re-seeded in prepare(), so renders are deterministic.
  */
 class VoiceManager {
 public:
@@ -29,16 +29,14 @@ public:
     void allSoundOff() noexcept;   // silence immediately (CC 120)
 
     void control(const VoiceControl& control) noexcept;
-    void render(float* left, float* right, int numSamples, const dsp::WavetableBank* bank) noexcept;
+    void render(float* left, float* right, int numSamples, const VoiceTables& tables) noexcept;
 
     int activeCount() const noexcept;
 
 private:
-    double nextRandom() noexcept;   // xorshift64*, [0,1)
-
     std::array<Voice, kMaxVoices> m_voices;
     std::uint64_t m_order = 0;
-    std::uint64_t m_rng = 0x9E3779B97F4A7C15ull;
+    Rng m_rng;
     bool m_sustainPedal = false;
 };
 

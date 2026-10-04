@@ -89,4 +89,25 @@ std::shared_ptr<const WavetableBank> makeBasicShapesTable()
     return WavetableBank::build(frames, N, "Basic Shapes");
 }
 
+std::shared_ptr<const WavetableBank> makeSubShapesTable()
+{
+    constexpr int N = WavetableBank::kFrameSize;
+    constexpr int count = static_cast<int>(SubShape::Count);
+    std::vector<float> frames(static_cast<std::size_t>(count * N));
+    for (int i = 0; i < N; ++i) {
+        const double p = (i + 0.5) / N;
+        const double s = std::sin(2.0 * kPi * i / N);
+        auto at = [&](SubShape shape) -> float& {
+            return frames[static_cast<std::size_t>(static_cast<int>(shape) * N + i)];
+        };
+        at(SubShape::Sine)        = static_cast<float>(s);
+        at(SubShape::RoundedRect) = static_cast<float>(std::tanh(4.0 * s) / std::tanh(4.0));
+        at(SubShape::Triangle)    = static_cast<float>(p < 0.5 ? 4.0 * p - 1.0 : 3.0 - 4.0 * p);
+        at(SubShape::Saw)         = static_cast<float>(1.0 - 2.0 * p);
+        at(SubShape::Square)      = p < 0.5 ? 1.0f : -1.0f;
+        at(SubShape::Pulse)       = p < 0.25 ? 1.0f : -1.0f;
+    }
+    return WavetableBank::build(frames, N, "Sub Shapes");
+}
+
 } // namespace winerose::dsp

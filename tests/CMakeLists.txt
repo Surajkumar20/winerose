@@ -15,6 +15,8 @@ add_executable(winerose_tests
     unit/test_global_settings.cpp
     unit/test_engine.cpp
     unit/test_dsp.cpp
+    unit/test_warp_unison.cpp
+    unit/test_engine_phase2.cpp
     unit/test_controller.cpp
     unit/test_preset_format.cpp
     unit/test_vendored_libs.cpp)
@@ -37,6 +39,14 @@ target_compile_definitions(winerose_golden_tests PRIVATE
 winerose_target_defaults(winerose_golden_tests)
 set_target_properties(winerose_golden_tests PROPERTIES FOLDER "Winerose/Tests")
 catch_discover_tests(winerose_golden_tests TEST_PREFIX "golden.")
+
+# --- Benchmarks (label "benchmark"; the CPU threshold is asserted only in optimized builds) ------------
+add_executable(winerose_benchmark benchmark/test_benchmark.cpp)
+target_link_libraries(winerose_benchmark PRIVATE Catch2::Catch2WithMain winerose_engine)
+winerose_target_defaults(winerose_benchmark)
+set_target_properties(winerose_benchmark PROPERTIES FOLDER "Winerose/Tests")
+add_test(NAME benchmark.phase2_cpu COMMAND winerose_benchmark --success)
+set_tests_properties(benchmark.phase2_cpu PROPERTIES LABELS "benchmark" TIMEOUT 600)
 
 # --- Architecture (layering checker) ---------------------------------------------------------------
 set(_arch_generator_args -G "${CMAKE_GENERATOR}")

@@ -6,6 +6,7 @@ namespace winerose::voice {
 
 void VoiceManager::prepare(double sampleRate) noexcept
 {
+    Voice::initDownsamplerCoefs();
     for (auto& v : m_voices) v.prepare(sampleRate);
     reset();
 }
@@ -14,23 +15,13 @@ void VoiceManager::reset() noexcept
 {
     for (auto& v : m_voices) v.kill();
     m_order = 0;
-    m_rng = 0x9E3779B97F4A7C15ull;
+    m_rng = Rng{};
     m_sustainPedal = false;
-}
-
-double VoiceManager::nextRandom() noexcept
-{
-    m_rng ^= m_rng >> 12;
-    m_rng ^= m_rng << 25;
-    m_rng ^= m_rng >> 27;
-    const std::uint64_t r = m_rng * 0x2545F4914F6CDD1Dull;
-    return static_cast<double>(r >> 11) * (1.0 / 9007199254740992.0);   // 53 bits → [0,1)
 }
 
 void VoiceManager::noteOn(int note, int polyphony, const VoiceControl& control) noexcept
 {
     polyphony = std::clamp(polyphony, 1, kMaxVoices);
-    const double startPhase = control.osc.phase + control.osc.random * nextRandom();
     const std::uint64_t order = ++m_order;
 
     int active = 0;
@@ -39,7 +30,7 @@ void VoiceManager::noteOn(int note, int polyphony, const VoiceControl& control) 
     if (active < polyphony) {
         for (auto& v : m_voices) {
             if (!v.active()) {
-                v.start(note, order, startPhase, control);
+                v.start(note, order, control, m_rng);
                 return;
             }
         }
@@ -105,10 +96,10 @@ void VoiceManager::control(const VoiceControl& control) noexcept
         if (v.active()) v.control(control);
 }
 
-void VoiceManager::render(float* left, float* right, int numSamples, const dsp::WavetableBank* bank) noexcept
+void VoiceManager::render(float* left, float* right, int numSamples, const VoiceTables& tables) noexcept
 {
     for (auto& v : m_voices)
-        if (v.active()) v.render(left, right, numSamples, bank);
+        if (v.active()) v.render(left, right, numSamples, tables);
 }
 
 int VoiceManager::activeCount() const noexcept
