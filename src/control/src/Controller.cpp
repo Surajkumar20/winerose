@@ -427,6 +427,9 @@ Result Controller::loadPreset(std::span<const std::uint8_t> bytes)
     if (format == PresetFormat::SerumPreset) serum2 = presets::SerumPresetFile::read(bytes, error);
     else                                     serum1 = presets::FxpFile::read(bytes, error);
     if (!serum2 && !serum1) return Result::failure(std::string(presetFormatName(format)) + ": " + error);
+    // Another synth's .fxp/.fxb: refuse before touching the patch.
+    if (serum1 && !serum1->programs.front().isSerum())
+        return Result::failure("not a Serum preset (made by plugin '" + serum1->programs.front().fxId + "')");
 
     presets::SerumImporter importer(m_config, m_assetRoots);
     m_config->beginBatch();

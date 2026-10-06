@@ -3,6 +3,7 @@
 #include "Widgets.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
+#include <juce_data_structures/juce_data_structures.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <functional>
@@ -185,7 +186,7 @@ private:
 /** Preset files: Winerose presets plus the user's Serum preset folders (imported on click). */
 class PresetBrowser final : public juce::Component, private juce::ListBoxModel {
 public:
-    PresetBrowser(ParamHub& hub, std::function<void(const juce::File&)> load);
+    PresetBrowser(ParamHub& hub, std::function<void(const juce::File&)> load, juce::PropertiesFile* settings);
     void resized() override;
     void paint(juce::Graphics&) override;
     void rescan();
@@ -198,10 +199,15 @@ private:
     void paintListBoxItem(int row, juce::Graphics&, int w, int h, bool selected) override;
     void listBoxItemClicked(int row, const juce::MouseEvent&) override;
     void filter();
+    juce::StringArray folders() const;
+    void addFolder();
 
     ParamHub& m_hub;
     std::function<void(const juce::File&)> m_load;
+    juce::PropertiesFile* m_settings;
     TabStrip m_roots;
+    juce::TextButton m_addFolder {"Add folder..."}, m_clearFolders {"Clear folders"};
+    std::unique_ptr<juce::FileChooser> m_chooser;
     juce::TextEditor m_search;
     juce::ListBox m_list {"presets", this};
     juce::Array<juce::File> m_all, m_shown;

@@ -285,3 +285,15 @@ TEST_CASE("wavetables in other formats and frame sizes are read", "[presets][wav
     REQUIRE(result.ok);
     CHECK(result.message.find("3-frame") != std::string::npos);
 }
+
+TEST_CASE("another synth's .fxp is refused and leaves the patch alone", "[presets][fxp]")
+{
+    auto bytes = FxpFile::writeForTests("Not Serum", std::vector<std::uint8_t>(1000, 0));
+    std::memcpy(bytes.data() + 0x10, "OBXd", 4);
+    Fixture f;
+    f.ctl.set("Filter0.cutoff", 1234.0);
+    const auto r = f.ctl.loadPreset(bytes);
+    CHECK_FALSE(r.ok);
+    CHECK(r.error.find("not a Serum preset") != std::string::npos);
+    CHECK(f.ctl.get("Filter0.cutoff").number() == Approx(1234.0));
+}

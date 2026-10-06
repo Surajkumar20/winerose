@@ -789,11 +789,20 @@ juce::File PresetBrowser::userFolder()
     return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("Winerose").getChildFile("Presets");
 }
 
-PresetBrowser::PresetBrowser(ParamHub& hub, std::function<void(const juce::File&)> load) : m_hub(hub), m_load(std::move(load))
+PresetBrowser::PresetBrowser(ParamHub& hub, std::function<void(const juce::File&)> load, juce::PropertiesFile* settings)
+    : m_hub(hub), m_load(std::move(load)), m_settings(settings)
 {
-    m_roots.setTabs({"Winerose", "Serum 2 (import)", "Serum 1 (import)"});
+    m_roots.setTabs({"Winerose", "Serum 2", "Serum 1", "My folders"});
     m_roots.onSelect = [this](int i) { m_root = i; rescan(); };
     addAndMakeVisible(m_roots);
+    m_addFolder.setTooltip("Add a folder of presets (e.g. your Serum 2 preset library) to \"My folders\"");
+    m_addFolder.onClick = [this] { addFolder(); };
+    m_clearFolders.onClick = [this] {
+        if (m_settings != nullptr) { m_settings->setValue("presetFolders", juce::String()); m_settings->saveIfNeeded(); }
+        rescan();
+    };
+    addAndMakeVisible(m_addFolder);
+    addAndMakeVisible(m_clearFolders);
     m_search.setTextToShowWhenEmpty("Search presets...", colours::textDim);
     m_search.onTextChange = [this] { filter(); };
     addAndMakeVisible(m_search);
@@ -802,18 +811,46 @@ PresetBrowser::PresetBrowser(ParamHub& hub, std::function<void(const juce::File&
     rescan();
 }
 
+juce::StringArray PresetBrowser::folders() const
+{
+    juce::StringArray list;
+    if (m_settings != nullptr) list.addTokens(m_settings->getValue("presetFolders"), "|", "");
+    list.removeEmptyStrings();
+    return list;
+}
+
+void PresetBrowser::addFolder()
+{
+    m_chooser = std::make_unique<juce::FileChooser>("Add a preset folder",
+                                                    juce::File::getSpecialLocation(juce::File::userDocumentsDirectory));
+    m_chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories, [this](const juce::FileChooser& fc) {
+        const auto dir = fc.getResult();
+        if (!dir.isDirectory() || m_settings == nullptr) return;
+        auto list = folders();
+        list.addIfNotAlreadyThere(dir.getFullPathName());
+        m_settings->setValue("presetFolders", list.joinIntoString("|"));
+        m_settings->saveIfNeeded();
+        m_roots.setSelected(3);
+    });
+}
+
 void PresetBrowser::rescan()
 {
     const auto docs = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
-    juce::File root;
+    juce::Array<juce::File> roots;
     juce::String pattern;
     switch (m_root) {
-        case 1: root = docs.getChildFile("Xfer/Serum 2 Presets"); pattern = "*.SerumPreset"; break;
-        case 2: root = docs.getChildFile("Xfer/Serum Presets"); pattern = "*.fxp"; break;
-        default: root = userFolder(); pattern = "*.wrpreset;*.json"; break;
+        case 1: roots.add(docs.getChildFile("Xfer/Serum 2 Presets")); pattern = "*.SerumPreset"; break;
+        case 2: roots.add(docs.getChildFile("Xfer/Serum Presets")); pattern = "*.fxp;*.fxb"; break;
+        case 3:
+            for (const auto& f : folders()) roots.add(juce::File(f));
+            pattern = "*.SerumPreset;*.fxp;*.fxb;*.wrpreset";
+            break;
+        default: roots.add(userFolder()); pattern = "*.wrpreset;*.json"; break;
     }
     m_all.clear();
-    if (root.isDirectory()) {
+    for (const auto& root : roots) {
+        if (!root.isDirectory()) continue;
         for (const auto& entry : juce::RangedDirectoryIterator(root, true, pattern, juce::File::findFiles)) {
             m_all.add(entry.getFile());
             if (m_all.size() >= 20000) break;
@@ -831,8 +868,10 @@ void PresetBrowser::filter()
     m_shown.clear();
     for (const auto& f : m_all)
         if (q.isEmpty() || f.getRelativePathFrom(f.getParentDirectory().getParentDirectory()).containsIgnoreCase(q)) m_shown.add(f);
+    m_list.setVisible(!m_all.isEmpty());   // otherwise the panel shows where to find / add presets
     m_list.updateContent();
     m_list.repaint();
+    repaint();
 }
 
 juce::File PresetBrowser::step(int delta)
@@ -851,9 +890,15 @@ void PresetBrowser::paint(juce::Graphics& g)
     if (m_all.isEmpty()) {
         g.setColour(colours::textDim);
         g.setFont(juce::FontOptions(14.0f));
-        const juce::String where = m_root == 0 ? userFolder().getFullPathName() : juce::String("your Xfer presets folder (Documents/Xfer)");
-        g.drawFittedText("No presets found in " + where + (m_root == 0 ? ".\nUse Save in the header to create one." : "."),
-                         getLocalBounds().reduced(40, 120), juce::Justification::centredTop, 3);
+        juce::String msg;
+        switch (m_root) {
+            case 0: msg = "No Winerose presets yet in " + userFolder().getFullPathName() + ".\nUse Save in the header to create one."; break;
+            case 1: msg = "No Serum 2 presets in Documents/Xfer/Serum 2 Presets.\nUse \"Import...\" in the header for single files, or \"Add folder...\" for a preset library anywhere on disk."; break;
+            case 2: msg = "No Serum 1 presets in Documents/Xfer/Serum Presets.\nUse \"Import...\" or \"Add folder...\"."; break;
+            default: msg = folders().isEmpty() ? juce::String("No folders added. Click \"Add folder...\" and pick a folder of .SerumPreset / .fxp / .wrpreset files.")
+                                               : juce::String("No presets found in the added folders."); break;
+        }
+        g.drawFittedText(msg, getLocalBounds().reduced(40, 140), juce::Justification::centredTop, 4);
     }
 }
 
@@ -861,7 +906,11 @@ void PresetBrowser::resized()
 {
     auto r = getLocalBounds().reduced(12);
     r.removeFromTop(26);
-    m_roots.setBounds(r.removeFromTop(28).removeFromLeft(520));
+    auto bar = r.removeFromTop(28);
+    m_clearFolders.setBounds(bar.removeFromRight(110));
+    bar.removeFromRight(6);
+    m_addFolder.setBounds(bar.removeFromRight(110));
+    m_roots.setBounds(bar.removeFromLeft(560));
     r.removeFromTop(6);
     m_search.setBounds(r.removeFromTop(28));
     r.removeFromTop(6);

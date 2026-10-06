@@ -8,6 +8,12 @@ namespace winerose::ui {
 
 namespace {
 
+class ClickLabel final : public juce::Label {
+public:
+    std::function<void()> onClick;
+    void mouseUp(const juce::MouseEvent&) override { if (onClick) onClick(); }
+};
+
 class Meter final : public juce::Component, private juce::Timer {
 public:
     explicit Meter(control::IController& c) : m_controller(c) { startTimerHz(30); }
@@ -60,6 +66,11 @@ public:
         m_name.onClick = [this] { m_pages.setSelected(4); };
         m_name.setTooltip("Browse presets");
         m_save.onClick = [this] { savePreset(); };
+        m_import.setTooltip("Import a preset file: .SerumPreset, .fxp/.fxb (Serum 1) or a Winerose preset");
+        m_import.onClick = [this] { importFile(); };
+        addAndMakeVisible(m_import);
+        m_status.onClick = [this] { showImportReport(); };
+        m_status.setMouseCursor(juce::MouseCursor::PointingHandCursor);
         m_undo.onClick = [this] { m_hub.controller().undo(); };
         m_redo.onClick = [this] { m_hub.controller().redo(); };
         for (auto* b : {&m_prev, &m_next, &m_name, &m_save, &m_undo, &m_redo}) addAndMakeVisible(b);
@@ -76,7 +87,13 @@ public:
         m_matrix = std::make_unique<MatrixPage>(hub);
         m_fx = std::make_unique<FxPage>(hub);
         m_midi = std::make_unique<MidiPage>(hub);
-        m_browser = std::make_unique<PresetBrowser>(hub, [this](const juce::File& f) { loadFile(f); });
+        juce::PropertiesFile::Options options;
+        options.applicationName = "Winerose";
+        options.folderName = "Winerose";
+        options.filenameSuffix = ".settings";
+        options.osxLibrarySubFolder = "Application Support";
+        m_settings = std::make_unique<juce::PropertiesFile>(options);
+        m_browser = std::make_unique<PresetBrowser>(hub, [this](const juce::File& f) { loadFile(f); }, m_settings.get());
         m_table = std::make_unique<TablePage>(hub, [this] { savePreset(); });
         for (juce::Component* p : pages()) addChildComponent(p);
 
@@ -112,13 +129,15 @@ public:
         header.removeFromRight(6);
         auto top = header.removeFromTop(30);
         m_logo.setBounds(top.removeFromLeft(140));
-        m_pages.setBounds(top.removeFromLeft(470).reduced(0, 2));
-        top.removeFromLeft(14);
+        m_pages.setBounds(top.removeFromLeft(460).reduced(0, 2));
+        top.removeFromLeft(10);
         m_prev.setBounds(top.removeFromLeft(26).reduced(0, 2));
-        m_name.setBounds(top.removeFromLeft(210).reduced(2, 2));
+        m_name.setBounds(top.removeFromLeft(170).reduced(2, 2));
         m_next.setBounds(top.removeFromLeft(26).reduced(0, 2));
         top.removeFromLeft(4);
         m_save.setBounds(top.removeFromLeft(50).reduced(0, 2));
+        top.removeFromLeft(4);
+        m_import.setBounds(top.removeFromLeft(64).reduced(0, 2));
         top.removeFromLeft(10);
         m_undo.setBounds(top.removeFromLeft(50).reduced(0, 2));
         m_redo.setBounds(top.removeFromLeft(54).reduced(0, 2).withTrimmedLeft(4));
@@ -137,7 +156,9 @@ public:
         if (r.ok) {
             m_name.setButtonText(f.getFileNameWithoutExtension());
             m_browser->setCurrent(f);
-            setStatus(r.message.empty() ? "Loaded " + f.getFileName() : juce::String(r.message));
+            const bool serum = f.hasFileExtension("SerumPreset;fxp;fxb");
+            setStatus(r.message.empty() ? "Loaded " + f.getFileName()
+                                        : juce::String(r.message) + (serum ? "  (click for details)" : ""));
         } else {
             setStatus("Could not load " + f.getFileName() + ": " + juce::String(r.error));
         }
@@ -167,6 +188,39 @@ private:
         const auto f = m_browser->step(delta);
         if (f.existsAsFile()) loadFile(f);
         else setStatus("No presets in the current browser folder");
+    }
+
+    void importFile()
+    {
+        m_chooser = std::make_unique<juce::FileChooser>("Import a preset", juce::File::getSpecialLocation(juce::File::userDocumentsDirectory),
+                                                        "*.SerumPreset;*.fxp;*.fxb;*.wrpreset;*.json");
+        m_chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [this](const juce::FileChooser& fc) {
+            if (fc.getResult().existsAsFile()) loadFile(fc.getResult());
+        });
+    }
+
+    void showImportReport()
+    {
+        const auto report = juce::JSON::parse(juce::String(m_hub.controller().importReport()));
+        if (!report.isObject() || report["format"].toString().isEmpty()) return;
+        juce::String text;
+        text << report["format"].toString() << "  \"" << report["name"].toString() << "\"";
+        if (report["author"].toString().isNotEmpty()) text << " by " << report["author"].toString();
+        text << "\n\nMapped onto Winerose controls: " << (static_cast<int>(report["mappedExplicit"]) + static_cast<int>(report["mappedBySynonym"]))
+             << " (" << static_cast<int>(report["mappedBySynonym"]) << " by name, unverified)\n";
+        const auto* unmapped = report["unmapped"].getArray();
+        text << "Kept but not yet mapped: " << (unmapped != nullptr ? unmapped->size() : 0)
+             << "  (stored in the patch; they start working when the Serum tables are filled in)\n";
+        if (const auto* w = report["wavetables"].getArray()) text << "Wavetables loaded: " << w->size() << "\n";
+        if (const auto* warnings = report["warnings"].getArray(); warnings != nullptr && !warnings->isEmpty()) {
+            text << "\nWarnings:\n";
+            for (const auto& w : *warnings) text << "  - " << w.toString() << "\n";
+        }
+        if (unmapped != nullptr && !unmapped->isEmpty()) {
+            text << "\nUnmapped settings (first 40):\n";
+            for (int i = 0; i < std::min(40, unmapped->size()); ++i) text << "  " << (*unmapped)[i].toString() << "\n";
+        }
+        juce::AlertWindow::showMessageBoxAsync(juce::MessageBoxIconType::InfoIcon, "Import report", text, "OK", this);
     }
 
     void savePreset()
@@ -210,7 +264,11 @@ private:
 
     ParamHub& m_hub;
     juce::TooltipWindow m_tooltips {this, 600};
-    juce::Label m_logo, m_status;
+    juce::Label m_logo;
+    ClickLabel m_status;
+    juce::TextButton m_import {"Import..."};
+    std::unique_ptr<juce::FileChooser> m_chooser;
+    std::unique_ptr<juce::PropertiesFile> m_settings;
     TabStrip m_pages;
     juce::TextButton m_prev {"<"}, m_next {">"}, m_name, m_save {"Save"}, m_undo {"Undo"}, m_redo {"Redo"};
     Meter m_meter;
