@@ -101,7 +101,7 @@ void read2(const float* left, const float* right, double pos, int cutoff, float&
  */
 struct SamplePlayer {
     enum class Loop : int { Off = 0, Forward, PingPong, Sustain, Count };   // Sustain: loop until release, then play out
-    static constexpr const char* kLoopNames[] = {"Off (one-shot)", "Forward", "Ping-pong", "Sustain"};
+    static constexpr const char* kLoopNames[] = {"One-shot", "Forward", "Ping-pong", "Sustain"};
 
     // Region (set at note start)
     std::int64_t start = 0, end = 0;               // play range [start, end)

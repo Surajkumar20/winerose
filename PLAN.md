@@ -628,3 +628,34 @@ not saved in the patch. Clip editing UI arrives with feature/UI (clips are text 
 
 **CPU.** The acceptance scenario costs +0.3 points over Phase 6 (A/B on the same machine: 23.5% → 23.8%). This
 machine currently measures ~2 points slower than earlier runs, so the 25% budget is tight; it still passes.
+
+---
+
+## 11. As built on `feature/UI`: Phase 8 UI
+
+An original Winerose UI drawn inside the plugin window (the Serum / Analog Lab model). It talks only to
+`IController`; the processor shares one JUCE object with it, the on-screen keyboard's `MidiKeyboardState`.
+
+| Piece | Where | Notes |
+|---|---|---|
+| Theme (plum panels, wine accent, gold highlights; knobs, combos, switches, buttons) | `ui/src/Theme` | Not Serum's look. |
+| `ParamHub`: schema cache, one subscription, per-key fan-out on the message thread | `ui/src/Widgets` | Changes from other threads are re-posted; panels rebuild via AsyncUpdater, never inside a callback. |
+| Widgets: Knob (double-click = default, double-click the value to type, e.g. "250 ms", "2.5 kHz"), Choice, Switch, HSlider, ModulePanel, TabStrip | `ui/src/Widgets`, `Pages` | Schema-driven: control type, range, default, tooltip come from `IController::schema()`. |
+| Sound page: OSC A/B/C (layout switches per type: Wavetable / Sample / Multisample / Granular / Spectral; "Load" for .wav/.sfz), Noise, Sub, Filter 1/2, Env 1-4, LFO 1-10, named Macros, Voice + filter routing | `ui/src/Pages` | |
+| Matrix page: 64 slots (bypass, source, destination menu grouped by module from `ParamSchema::modulatable`, amount, bipolar, curve, aux, aux amount, output) | | |
+| FX page: Main / Bus 1 / Bus 2 racks, 8 slots each (on, type), detail panel with the effect's own knob names/values, mixer | | Unused effect knobs hidden. |
+| MIDI page: key/scale, arp, clip player, piano-roll clip editor (1/16 grid; click adds, drag lengthens, click deletes) | | Edits are ordinary undoable parameter changes. |
+| Presets page: Winerose presets (`Documents/Winerose/Presets/*.wrpreset`) and Serum 2 / Serum 1 folders (imported on click); search; header prev/next/save | | |
+| All Params page: ParamTableView — every parameter, search, double-click a value to edit, floating "Save preset..." | | |
+| Header: page tabs, preset bar, undo/redo, master, peak meter, status line; keyboard at the bottom; drag & drop presets / .wav / .sfz | `ui/src/WineroseEditor` | One design size (1200x820) scaled with a locked aspect ratio, 50%-200%. |
+| `tools/ui_snapshot` | | Renders every page to PNG offscreen (real Engine + Controller) for review without a DAW. |
+
+Control-layer additions for the UI: `ParamSchema::modulatable`; display formatting in `Controller::format`
+(3 significant digits, ms below 1 s, kHz from 1 kHz) with `modify` accepting those units.
+
+Plugin fixes found on the way: arp/clip MIDI out is drained after every engine chunk (offset into the host
+block) instead of once per block, and the transport position advances per chunk.
+
+Verified: pluginval strictness 10 SUCCESS, no warnings (editor open / open whilst processing / automation).
+Not verifiable here: FL Studio state recall (no FL install) — the state path is the same JSON chunk the
+measure_host round-trip test covers.

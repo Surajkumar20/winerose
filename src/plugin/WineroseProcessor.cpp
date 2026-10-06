@@ -13,10 +13,11 @@ constexpr std::size_t kMaxMidiEventsPerBlock = 4096;
 
 class MidiBufferSink final : public MidiEventSink {
 public:
-    explicit MidiBufferSink(juce::MidiBuffer& buffer) : m_buffer(buffer) {}
-    void push(const MidiEvent& e) noexcept override { m_buffer.addEvent(e.data, e.size, e.sampleOffset); }
+    MidiBufferSink(juce::MidiBuffer& buffer, int offset) : m_buffer(buffer), m_offset(offset) {}
+    void push(const MidiEvent& e) noexcept override { m_buffer.addEvent(e.data, e.size, e.sampleOffset + m_offset); }
 private:
     juce::MidiBuffer& m_buffer;
+    int m_offset;
 };
 
 } // namespace
@@ -92,6 +93,9 @@ void WineroseProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
         return;
     }
 
+    // The on-screen keyboard's notes join the host's.
+    m_keyboardState.processNextMidiBuffer(midi, 0, numSamples, true);
+
     // JUCE MidiBuffer → POD events (capacity reserved in prepareToPlay; overflow is dropped, never allocated).
     m_midiIn.clear();
     for (const auto meta : midi) {
@@ -130,17 +134,19 @@ void WineroseProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
             m_channelPtrs[static_cast<std::size_t>(ch)] = channels[ch] + start;
         m_engine->process(m_channelPtrs.data(), numChannels, n,
                           m_chunkEvents.data(), static_cast<int>(m_chunkEvents.size()), transport);
+        // Arp / clip output of this chunk (the engine keeps one chunk's worth), at its place in the block.
+        MidiBufferSink sink(midi, start);
+        m_engine->drainMidiOut(sink);
+        transport.ppqPosition += transport.bpm / 60.0 * n / getSampleRate();
     }
     for (int ch = numChannels; ch < buffer.getNumChannels(); ++ch) buffer.clear(ch, 0, numSamples);
 
-    MidiBufferSink sink(midi);
-    m_engine->drainMidiOut(sink);
 }
 
 juce::AudioProcessorEditor* WineroseProcessor::createEditor()
 {
     // The one line to change when the UI is replaced (e.g. a WebBrowserComponent editor) — PLAN.md §1.4.
-    return new ui::WineroseEditor(*this, *m_controller);
+    return new ui::WineroseEditor(*this, *m_controller, &m_keyboardState);
 }
 
 void WineroseProcessor::getStateInformation(juce::MemoryBlock& destData)

@@ -56,6 +56,7 @@ private:
     std::shared_ptr<ConfigManager>       m_config;
     std::unique_ptr<Engine>              m_engine;
     std::unique_ptr<control::Controller> m_controller;
+    juce::MidiKeyboardState m_keyboardState;   // the editor's on-screen keyboard
     std::unique_ptr<HostSync>            m_hostSync;
 
     // Preallocated in prepareToPlay(): processBlock never allocates.

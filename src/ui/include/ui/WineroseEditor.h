@@ -3,65 +3,43 @@
 #include "control/IController.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <memory>
-#include <string>
-#include <vector>
 
 namespace winerose::ui {
 
+class Theme;
+class ParamHub;
+class Content;
+
 /**
  * @class WineroseEditor
- * @brief Placeholder editor: one generic control per parameter, built entirely from IController::schema().
+ * @brief The Winerose plugin window (feature/UI, SPEC Phase 8): pages for Sound, Matrix, FX, MIDI, Presets and
+ *        All Params, a header with the preset bar, undo/redo and master, and an on-screen keyboard.
  *
- * It knows nothing about the engine — only parameter IDs ("Global.masterVolume") and the control API —
- * which is the rule every UI in this project follows (PLAN.md §1.4). feature/UI replaces it with the
- * original Winerose design plus the ParamTableView; a later web UI replaces it with a WebBrowserComponent.
+ * Talks to the synth only through IController (PLAN.md §1.4); the keyboard state is the one JUCE object the
+ * processor shares. The whole UI is designed at one size and scaled (aspect-locked), so it stays crisp and
+ * consistent at any window size.
  */
 class WineroseEditor final : public juce::AudioProcessorEditor, public juce::FileDragAndDropTarget {
 public:
-    WineroseEditor(juce::AudioProcessor& processor, control::IController& controller);
+    static constexpr int kDesignWidth = 1200;
+    static constexpr int kDesignHeight = 820;
+
+    WineroseEditor(juce::AudioProcessor& processor, control::IController& controller, juce::MidiKeyboardState* keyboard = nullptr);
     ~WineroseEditor() override;
 
-    void paint(juce::Graphics& g) override;
+    void paint(juce::Graphics&) override;
     void resized() override;
-
-    // Drop a .SerumPreset / .fxp / Winerose preset / wavetable .wav anywhere on the window.
     bool isInterestedInFileDrag(const juce::StringArray& files) override;
     void filesDropped(const juce::StringArray& files, int x, int y) override;
 
 private:
-    struct Row {
-        control::ParamSchema              schema;
-        std::unique_ptr<juce::Label>      section;    // module header, on the first row of each module
-        std::unique_ptr<juce::Label>      label;
-        std::unique_ptr<juce::Slider>     slider;     // numeric params (value = normalized 0..1)
-        std::unique_ptr<juce::ComboBox>   combo;      // enum / bool params
-        std::unique_ptr<juce::TextEditor> text;       // string params
-        bool                              dragging = false;
-    };
-
-    void buildRows();
-    void layoutRows();
-    void refresh(Row& row);
-    void refreshAll();
-    void refreshModule(const std::string& module);
-    Row* findRow(const std::string& nsKey);
-    void commit(Row& row, const control::ParamValue& value);
-    void loadFile(const juce::File& file);
-
-    control::IController& m_controller;
-    juce::Label           m_title;
-    juce::TextButton      m_undo { "Undo" };
-    juce::TextButton      m_redo { "Redo" };
-    juce::TextButton      m_load { "Load preset..." };
-    juce::Label           m_status;      // result of the last preset load
-    std::unique_ptr<juce::FileChooser> m_chooser;
-    juce::Viewport        m_viewport;
-    juce::Component       m_content;     // holds every row; scrolled by m_viewport
-    std::vector<std::unique_ptr<Row>> m_rows;
-    control::Subscription m_subscription;   // declared last: unsubscribes before rows are destroyed
+    std::unique_ptr<Theme> m_theme;
+    std::unique_ptr<ParamHub> m_hub;
+    std::unique_ptr<Content> m_content;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WineroseEditor)
 };

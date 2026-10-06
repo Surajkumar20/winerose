@@ -43,6 +43,7 @@ struct ParamSchema {
     std::vector<std::pair<int, std::string>> choices;   // enum / bool only
     bool        automatable = true;
     int         vst3Id = -1;
+    bool        modulatable = false;   // a valid mod-matrix destination
 };
 
 /** A change notification. everything=true means "re-read all values" (preset load, undo of a batch, …). */

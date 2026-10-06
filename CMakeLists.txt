@@ -46,6 +46,7 @@ if(WINEROSE_BUILD_TOOLS)
     add_subdirectory(tools/preset_dump)
     if(WINEROSE_BUILD_PLUGIN)
         add_subdirectory(tools/measure_host)
+        add_subdirectory(tools/ui_snapshot)
     endif()
 endif()
 

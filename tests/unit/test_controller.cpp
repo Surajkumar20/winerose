@@ -213,3 +213,33 @@ TEST_CASE("choosing an FX type applies its defaults as one undo step; loading st
     REQUIRE(f.ctl.loadState(state).ok);
     CHECK(f.ctl.get("FXRack0Slot0.p1").number() == Approx(0.9));
 }
+
+TEST_CASE("display formatting: three significant digits, ms and kHz; typed units are understood", "[control]")
+{
+    Fixture f;
+    CHECK(f.ctl.format("Env0.attack", 0.0005) == "0.5 ms");
+    CHECK(f.ctl.format("Env0.release", 0.0149999996) == "15 ms");
+    CHECK(f.ctl.format("Env0.decay", 1.0) == "1 s");
+    CHECK(f.ctl.format("Filter0.cutoff", 425.0) == "425 Hz");
+    CHECK(f.ctl.format("Filter0.cutoff", 4567.0) == "4.57 kHz");
+    CHECK(f.ctl.format("Filter0.resonance", 0.100000001) == "0.1");
+    CHECK(f.ctl.format("Oscillator0.level", 0.0) == "0");
+    CHECK(f.ctl.modify("Env0.attack", "250 ms"));
+    CHECK(f.ctl.get("Env0.attack").number() == Approx(0.25));
+    CHECK(f.ctl.modify("Filter0.cutoff", "2.5 kHz"));
+    CHECK(f.ctl.get("Filter0.cutoff").number() == Approx(2500.0));
+    CHECK(f.ctl.modify("Filter0.cutoff", "800"));
+    CHECK(f.ctl.get("Filter0.cutoff").number() == Approx(800.0));
+}
+
+TEST_CASE("schema marks modulation targets", "[control]")
+{
+    Fixture f;
+    bool cutoff = false, masterVolume = true;
+    for (const auto& s : f.ctl.schema()) {
+        if (s.nsKey == "Filter0.cutoff") cutoff = s.modulatable;
+        if (s.nsKey == "Global.masterVolume") masterVolume = s.modulatable;
+    }
+    CHECK(cutoff);
+    CHECK_FALSE(masterVolume);
+}

@@ -29,7 +29,7 @@ inline void to_json(nlohmann::json& j, const ParamSchema& s)
         {"nsKey", s.nsKey}, {"module", s.module}, {"key", s.key}, {"group", s.group},
         {"tooltip", s.tooltip}, {"type", s.type}, {"min", s.min}, {"max", s.max},
         {"default", s.defaultValue}, {"curve", s.curve}, {"curveParam", s.curveParam},
-        {"unit", s.unit}, {"automatable", s.automatable}, {"vst3Id", s.vst3Id},
+        {"unit", s.unit}, {"automatable", s.automatable}, {"vst3Id", s.vst3Id}, {"modulatable", s.modulatable},
     };
     auto choices = nlohmann::json::array();
     for (const auto& [value, label] : s.choices) choices.push_back({{"value", value}, {"label", label}});
@@ -52,6 +52,7 @@ inline void from_json(const nlohmann::json& j, ParamSchema& s)
     s.unit        = j.value("unit", std::string{});
     s.automatable = j.value("automatable", true);
     s.vst3Id      = j.value("vst3Id", -1);
+    s.modulatable = j.value("modulatable", false);
     s.choices.clear();
     if (j.contains("choices"))
         for (const auto& c : j.at("choices"))

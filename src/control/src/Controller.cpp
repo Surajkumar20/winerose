@@ -9,6 +9,8 @@
 #include "presets/SerumImport.h"
 
 #include <array>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <optional>
 #include <map>
@@ -102,6 +104,10 @@ std::vector<ParamSchema> Controller::schema() const
             s.defaultValue = defaultOf(def);
             s.automatable  = def.automatable;
             s.vst3Id       = def.vst3_id;
+            {
+                const int t = m_engine.modules().targets.find(s.nsKey);
+                s.modulatable = t >= 0 && m_engine.modules().targets.at(t).modulatable;
+            }
             std::visit(overloaded{
                 [&](const NumericMeta& m) {
                     s.min = m.min_val; s.max = m.max_val;
@@ -177,7 +183,23 @@ bool Controller::modify(std::string_view nsKey, std::string_view text)
     auto* reg = resolve(nsKey, key);
     if (!reg) return false;
     const ParamValue before = get(nsKey);
-    if (!reg->modify(key, std::string(text))) return false;
+    // Accept the display units format() produces ("250 ms" for seconds, "2.5 kHz" for Hz).
+    std::string t(text);
+    if (const auto def = reg->find(key); def && std::holds_alternative<NumericMeta>(def->meta)) {
+        const std::string unit = unitOf(def->meta);
+        auto scaled = [&](const char* suffix, double factor) {
+            const auto at = t.find(suffix);
+            if (at == std::string::npos) return false;
+            char* end = nullptr;
+            const double v = std::strtod(t.c_str(), &end);
+            if (end == t.c_str()) return false;
+            t = std::to_string(v * factor);
+            return true;
+        };
+        if (unit == "s") scaled("ms", 0.001);
+        else if (unit == "Hz") scaled("kHz", 1000.0) || scaled("khz", 1000.0);
+    }
+    if (!reg->modify(key, t)) return false;
     m_history.record({std::string(nsKey), before, get(nsKey)});
     return true;
 }
@@ -211,8 +233,28 @@ std::string Controller::format(std::string_view nsKey, double plain) const
     }
     const auto def = reg->find(key);
     if (!def) return {};
-    std::string text = formatPlain(def->meta, plain);
-    if (const auto unit = unitOf(def->meta); !unit.empty()) text += " " + unit;
+    const auto* numeric = std::get_if<NumericMeta>(&def->meta);
+    if (numeric == nullptr || numeric->subtype == NumericMeta::SubType::INT) {
+        std::string text = formatPlain(def->meta, plain);
+        if (const auto unit = unitOf(def->meta); !unit.empty()) text += " " + unit;
+        return text;
+    }
+    // Display: three significant digits, no exponent, ms below a second, kHz from 1 kHz.
+    std::string unit = unitOf(def->meta);
+    double v = plain;
+    if (unit == "s" && std::abs(v) < 1.0) { v *= 1000.0; unit = "ms"; }
+    else if (unit == "Hz" && std::abs(v) >= 1000.0) { v /= 1000.0; unit = "kHz"; }
+    const double a = std::abs(v);
+    const int decimals = a >= 100.0 ? 0 : a >= 10.0 ? 1 : a >= 1.0 ? 2 : a >= 0.1 ? 3 : a >= 0.01 ? 4 : a == 0.0 ? 0 : 5;
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "%.*f", decimals, v);
+    std::string text = buf;
+    if (text.find('.') != std::string::npos) {   // trim trailing zeros
+        while (!text.empty() && text.back() == '0') text.pop_back();
+        if (!text.empty() && text.back() == '.') text.pop_back();
+    }
+    if (text == "-0") text = "0";
+    if (!unit.empty()) text += " " + unit;
     return text;
 }
 
