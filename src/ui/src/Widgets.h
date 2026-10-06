@@ -136,6 +136,8 @@ public:
     void setKeys(const std::vector<std::string>& keys);   // keys within the module ("cutoff")
     void setModule(std::string module, juce::String title);
     void setColumns(int c) { m_columns = c; resized(); }
+    /** A display (graph, editor) shown between the header and the controls. Not owned. */
+    void setTop(juce::Component* c, int height) { m_top = c; m_topHeight = height; if (c != nullptr) addAndMakeVisible(c); resized(); }
     void paint(juce::Graphics&) override;
     void resized() override;
     juce::Rectangle<int> headerExtra() const { return m_extra; }   // free header space for subclasses
@@ -151,6 +153,8 @@ protected:
     std::unique_ptr<Switch> m_enable;
     int m_columns;
     juce::Rectangle<int> m_extra;
+    juce::Component* m_top = nullptr;
+    int m_topHeight = 0;
     static constexpr int kHeader = 26;
 };
 

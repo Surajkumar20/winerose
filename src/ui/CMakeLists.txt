@@ -11,7 +11,8 @@ target_sources(winerose_ui_juce INTERFACE
     "${CMAKE_CURRENT_SOURCE_DIR}/src/WineroseEditor.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Theme.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Widgets.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/Pages.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Pages.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Visuals.cpp")
 target_include_directories(winerose_ui_juce INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(winerose_ui_juce INTERFACE winerose_control)
 

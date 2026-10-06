@@ -86,6 +86,9 @@ public:
      *  (switching the oscillator to Sample mode if it was Wavetable/Multisample), or an .sfz instrument
      *  (switching it to Multisample). The path is stored in the patch and reloaded with it. */
     virtual Result      loadOscillatorFile(int oscillator, const std::string& path) = 0;
+    /** For displays: oscillator A/B/C's current wavetable frame (`points` samples, -1..1), or for sample-based
+     *  types the loaded sample's peak envelope (`points` values, 0..1). Empty if nothing is loaded. */
+    virtual std::vector<float> oscillatorPreview(int oscillator, int points) const = 0;
 
     // --- Undo ---
     virtual bool undo() = 0;

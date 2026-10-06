@@ -93,8 +93,16 @@ void HSlider::sliderValueChanged(juce::Slider*)
 OscPanel::OscPanel(ParamHub& hub, int index, std::function<void(const juce::String&)> status)
     : ModulePanel(hub, juce::String("OSC ") + juce::String::charToString(static_cast<juce::juce_wchar>('A' + index)), "Oscillator" + std::to_string(index), 5)
     , m_index(index)
+    , m_view(hub, index)
     , m_status(std::move(status))
 {
+    m_curve.setTooltip("Edit the Remap curve used by the Remap warps");
+    m_curve.onClick = [this] {
+        auto editor = std::make_unique<CurveEditor>(m_hub, m_module + ".remapCurve");
+        editor->setSize(260, 180);
+        juce::CallOutBox::launchAsynchronously(std::move(editor), m_curve.getScreenBounds(), nullptr);
+    };
+    addAndMakeVisible(m_curve);
     m_type = std::make_unique<Choice>(hub, m_module + ".type", false);
     addAndMakeVisible(*m_type);
     m_load.setTooltip("Load a wavetable, sample (.wav) or SFZ instrument onto this oscillator");
@@ -108,6 +116,7 @@ OscPanel::OscPanel(ParamHub& hub, int index, std::function<void(const juce::Stri
     m_anyId = m_hub.onAny([this](const control::ParamChange& c) {
         if (c.everything || c.nsKey.rfind(m_module + ".", 0) == 0) updateFileName();
     });
+    setTop(&m_view, 44);   // after the header widgets exist (it lays the panel out)
     handleAsyncUpdate();
 }
 
@@ -138,6 +147,9 @@ void OscPanel::layoutHeader(juce::Rectangle<int>& header)
     m_type->setBounds(header.removeFromLeft(100).reduced(0, 1));
     header.removeFromLeft(4);
     m_load.setBounds(header.removeFromRight(44).reduced(0, 2));
+    const bool wavetable = std::lround(m_hub.number(m_module + ".type")) == 0;
+    m_curve.setVisible(wavetable);
+    if (wavetable) m_curve.setBounds(header.removeFromRight(44).reduced(1, 2));
     m_file.setBounds(header.reduced(2, 0));
 }
 
@@ -173,6 +185,7 @@ void TabbedModulePanel::select(int i)
         if (std::find(m_exclude.begin(), m_exclude.end(), k) == m_exclude.end()) keys.push_back(k);
     m_module = m_prefix + std::to_string(i);
     setKeys(keys);
+    if (onSelected) onSelected(i);
 }
 
 void TabbedModulePanel::layoutHeader(juce::Rectangle<int>& header)
@@ -230,6 +243,15 @@ SoundPage::SoundPage(ParamHub& hub, std::function<void(const juce::String&)> sta
     m_f2->setKeys(filterKeys);
     m_env = keep(std::make_unique<TabbedModulePanel>(hub, "ENV", "Env", 4, 4));
     m_lfo = keep(std::make_unique<TabbedModulePanel>(hub, "LFO", "LFO", 10, 5, std::vector<std::string>{"path"}));
+    m_envView = std::make_unique<EnvelopeView>(hub);
+    m_env->setTop(m_envView.get(), 82);
+    m_env->onSelected = [this](int i) { m_envView->setModule("Env" + std::to_string(i)); };
+    m_lfoPath = std::make_unique<CurveEditor>(hub, "LFO0.path");
+    m_lfoPath->inactiveNote = "Set Shape to Path to draw this LFO";
+    m_lfoPath->setTooltip("Drag points; double-click to add or remove; Alt-drag a segment to bend it; Shift snaps");
+    m_lfoPath->isActive = [this, &hub] { return std::lround(hub.number("LFO" + std::to_string(m_lfo->selected()) + ".shape")) == 0; };
+    m_lfo->setTop(m_lfoPath.get(), 92);
+    m_lfo->onSelected = [this](int i) { m_lfoPath->setKey("LFO" + std::to_string(i) + ".path"); };
     m_macros = keep(std::make_unique<MacroPanel>(hub));
     m_global = keep(std::make_unique<ModulePanel>(hub, "VOICE", "Global", 4));
     m_global->setKeys({"polyphony", "quality", "bendUp", "bendDown"});

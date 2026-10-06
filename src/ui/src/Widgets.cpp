@@ -335,6 +335,10 @@ void ModulePanel::resized()
     header.removeFromLeft(static_cast<int>(juce::GlyphArrangement::getStringWidth(juce::FontOptions(13.5f, juce::Font::bold), m_title)) + 18);
     layoutHeader(header);
     r.removeFromTop(4);
+    if (m_top != nullptr) {
+        m_top->setBounds(r.removeFromTop(m_topHeight));
+        r.removeFromTop(2);
+    }
     if (m_controls.empty()) return;
     const int cols = std::max(1, m_columns);
     const int rows = (static_cast<int>(m_controls.size()) + cols - 1) / cols;

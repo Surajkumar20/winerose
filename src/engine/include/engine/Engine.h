@@ -106,6 +106,7 @@ public:
     /** Message thread: the SFZ instrument oscillator A/B/C plays in Multisample mode (null clears). */
     void setOscillatorMultisample(int index, std::shared_ptr<const dsp::Multisample> instrument);
 
+    const dsp::WavetableBank* oscillatorTable(int index) const { return m_oscTables[static_cast<std::size_t>(index)].get(); }
     const dsp::SampleData*  oscillatorSample(int index) const { return m_oscSamples[static_cast<std::size_t>(index)].get(); }
     const dsp::Multisample* oscillatorMultisample(int index) const { return m_oscMulti[static_cast<std::size_t>(index)].get(); }
 

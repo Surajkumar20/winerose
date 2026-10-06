@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Visuals.h"
 #include "Widgets.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -44,7 +45,9 @@ private:
 
     int m_index;
     std::unique_ptr<Choice> m_type;
+    OscView m_view;
     juce::TextButton m_load {"Load"};
+    juce::TextButton m_curve {"Curve"};
     juce::Label m_file;
     std::unique_ptr<juce::FileChooser> m_chooser;
     std::function<void(const juce::String&)> m_status;
@@ -55,6 +58,8 @@ private:
 class TabbedModulePanel final : public ModulePanel {
 public:
     TabbedModulePanel(ParamHub& hub, juce::String title, std::string prefix, int count, int columns, std::vector<std::string> exclude = {});
+    std::function<void(int)> onSelected;   // after the panel switched module
+    int selected() const { return m_tabs.selected(); }
 
 private:
     void layoutHeader(juce::Rectangle<int>& header) override;
@@ -87,6 +92,8 @@ private:
     ModulePanel *m_noise, *m_sub, *m_f1, *m_f2, *m_global;
     TabbedModulePanel *m_env, *m_lfo;
     MacroPanel* m_macros;
+    std::unique_ptr<EnvelopeView> m_envView;
+    std::unique_ptr<CurveEditor> m_lfoPath;
 };
 
 class MatrixPage final : public juce::Component {

@@ -347,6 +347,39 @@ void Controller::reloadAssets(std::vector<std::string>& warnings)
     }
 }
 
+std::vector<float> Controller::oscillatorPreview(int oscillator, int points) const
+{
+    std::vector<float> out;
+    if (oscillator < 0 || oscillator >= modules::OscillatorModule::kCount || points < 2 || points > 8192) return out;
+    const std::string m = "Oscillator" + std::to_string(oscillator) + ".";
+    const auto type = static_cast<modules::OscType>(static_cast<int>(std::lround(get(m + modules::osc_keys::type).number())));
+    if (type == modules::OscType::Wavetable) {
+        const auto* table = m_engine.oscillatorTable(oscillator);
+        if (table == nullptr) return out;
+        const float frame = static_cast<float>(get(m + modules::osc_keys::wtPos).number()) * static_cast<float>(table->frameCount() - 1);
+        const auto fp = table->resolveFrame(frame);
+        out.resize(static_cast<std::size_t>(points));
+        for (int i = 0; i < points; ++i) out[static_cast<std::size_t>(i)] = table->read(static_cast<double>(i) / points, fp, {0, 0.0f});
+        return out;
+    }
+    const dsp::SampleData* s = m_engine.oscillatorSample(oscillator);
+    if (type == modules::OscType::Multisample) {
+        const auto* ms = m_engine.oscillatorMultisample(oscillator);
+        s = (ms != nullptr && !ms->regions.empty()) ? ms->regions.front().sample.get() : nullptr;
+    }
+    if (s == nullptr || s->frames() == 0) return out;
+    out.assign(static_cast<std::size_t>(points), 0.0f);
+    const std::int64_t frames = s->frames();
+    for (int i = 0; i < points; ++i) {
+        const std::int64_t a = frames * i / points, b = std::max(a + 1, frames * (i + 1) / points);
+        float peak = 0.0f;
+        const std::int64_t step = std::max<std::int64_t>(1, (b - a) / 256);   // sampled: cheap on long files
+        for (std::int64_t j = a; j < b; j += step) peak = std::max(peak, std::abs(s->monoAt(j)));
+        out[static_cast<std::size_t>(i)] = std::min(1.0f, peak);
+    }
+    return out;
+}
+
 Result Controller::loadOscillatorFile(int oscillator, const std::string& path)
 {
     if (oscillator < 0 || oscillator >= modules::OscillatorModule::kCount) return Result::failure("no such oscillator");
