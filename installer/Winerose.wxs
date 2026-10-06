@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Winerose Windows installer (WiX Toolset v5). Built by scripts\build.ps1 into packed\; not meant to be run by hand,
+  but the equivalent command is:
+
+    wix build installer\Winerose.wxs -arch x64 -d Version=0.1.0 -d Vst3Dir=<...>\Winerose.vst3
+              -d ClapFile=<...>\Winerose.clap -d StandaloneExe=<...>\Winerose.exe -o packed\Winerose-0.1.0-x64.msi
+
+  Installs per machine (64-bit):
+    VST3        C:\Program Files\Common Files\VST3\Winerose.vst3\   (required)
+    CLAP        C:\Program Files\Common Files\CLAP\Winerose.clap     (optional, on by default)
+    Standalone  C:\Program Files\Winerose\Winerose.exe + Start-menu shortcut (optional, on by default)
+
+  The UpgradeCode is permanent: a newer version replaces an older one in place (major upgrade).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Winerose"
+           Manufacturer="Winerose"
+           Version="$(Version)"
+           UpgradeCode="f63be3d2-1bde-4748-9875-21cdca7f03a6"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <SummaryInformation Description="Winerose wavetable synthesizer (VST3, CLAP, Standalone)" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Winerose is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPCOMMENTS" Value="Winerose wavetable synthesizer" />
+    <Property Id="ARPNOMODIFY" Value="0" />
+
+    <StandardDirectory Id="CommonFiles64Folder">
+      <Directory Id="VST3Folder" Name="VST3">
+        <Directory Id="WineroseVst3Bundle" Name="Winerose.vst3" />
+      </Directory>
+      <Directory Id="ClapFolder" Name="CLAP" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="InstallFolder" Name="Winerose" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="WineroseMenuFolder" Name="Winerose" />
+    </StandardDirectory>
+
+    <!-- The whole VST3 bundle, sub-folders included (Contents\x86_64-win\..., Contents\Resources\...). -->
+    <ComponentGroup Id="Vst3Files" Directory="WineroseVst3Bundle">
+      <Files Include="$(Vst3Dir)\**" />
+    </ComponentGroup>
+
+    <ComponentGroup Id="ClapFiles" Directory="ClapFolder">
+      <Component>
+        <File Source="$(ClapFile)" Name="Winerose.clap" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="StandaloneFiles" Directory="InstallFolder">
+      <Component>
+        <File Id="WineroseExe" Source="$(StandaloneExe)" Name="Winerose.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="StartMenu" Directory="WineroseMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="6a0f5b1e-3c2d-4e8f-9a71-2b4c6d8e0f13">
+        <Shortcut Id="WineroseShortcut" Name="Winerose" Description="Winerose standalone synthesizer"
+                  Target="[InstallFolder]Winerose.exe" WorkingDirectory="InstallFolder" />
+        <RemoveFolder Id="RemoveStartMenuFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\Winerose\Installer" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Vst3" Title="VST3 plug-in" Description="Winerose for VST3 hosts (FL Studio, Ableton Live, Cubase, Reaper, ...)." Level="1" AllowAbsent="no">
+      <ComponentGroupRef Id="Vst3Files" />
+    </Feature>
+    <Feature Id="Clap" Title="CLAP plug-in" Description="Winerose for CLAP hosts (Bitwig, Reaper, ...)." Level="1">
+      <ComponentGroupRef Id="ClapFiles" />
+    </Feature>
+    <Feature Id="Standalone" Title="Standalone application" Description="Winerose as its own app, with a Start-menu shortcut." Level="1">
+      <ComponentGroupRef Id="StandaloneFiles" />
+      <ComponentGroupRef Id="StartMenu" />
+    </Feature>
+  </Package>
+</Wix>

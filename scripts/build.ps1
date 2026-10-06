@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-    One-shot Winerose build: configure, build, run every test (unit, golden, arch, tools, pluginval).
+    One-shot Winerose build: configure, build, run every test (unit, golden, arch, tools, pluginval), then pack
+    the release into packed\: Winerose-<version>-x64.msi plus a copy of the Winerose.vst3 folder.
 
 .EXAMPLE
     .\scripts\build.ps1                          # vs2026 preset, Release, everything incl. pluginval
@@ -8,11 +9,16 @@
     .\scripts\build.ps1 -Preset vs2026-core      # JUCE-free layers only (no JUCE download)
     .\scripts\build.ps1 -Clean                   # delete build\<preset> first
     .\scripts\build.ps1 -SkipBenchmark           # skip CPU-threshold tests (unknown hardware, e.g. CI)
+    .\scripts\build.ps1 -SkipTests               # build + pack without running tests
+    .\scripts\build.ps1 -SkipPackage             # build + test only (no packed\ output)
 
 .NOTES
     Works in Windows PowerShell 5.1 and PowerShell 7. Finds a CMake new enough for the chosen generator,
     preferring the one bundled with Visual Studio (CMake 4.0 has no "Visual Studio 18 2026" generator).
     pluginval is downloaded once into build\tools\pluginval.
+    Packing needs the WiX Toolset v5 (`wix`); if it is missing and the .NET SDK is present, the script installs
+    it as a .NET global tool (pinned to 5.0.2). Packing runs only for plugin presets in Release/RelWithDebInfo,
+    and only after the build (and tests, unless skipped) succeeded. packed\ is emptied first.
 #>
 [CmdletBinding()]
 param(
@@ -26,6 +32,7 @@ param(
     [switch]$SkipTests,
     [switch]$SkipPluginval,
     [switch]$SkipBenchmark,   # CPU thresholds only mean something on known hardware (CI uses this)
+    [switch]$SkipPackage,     # no packed\ output (MSI + VST3 folder)
 
     [ValidateRange(1, 10)]
     [int]$Strictness = 10
@@ -82,6 +89,54 @@ function Get-Pluginval {
     return $exe
 }
 
+function Get-Wix {
+    $wix = Get-Command wix -ErrorAction SilentlyContinue
+    if ($wix) { return $wix.Source }
+    $userTool = Join-Path $env:USERPROFILE '.dotnet\tools\wix.exe'
+    if (Test-Path $userTool) { return $userTool }
+    if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
+        throw 'WiX Toolset not found and no .NET SDK to install it. Install the .NET SDK, then run: dotnet tool install --global wix --version 5.0.2'
+    }
+    Write-Host '==> Installing WiX Toolset 5.0.2 (.NET global tool)' -ForegroundColor Cyan
+    & dotnet tool install --global wix --version 5.0.2 | Out-Host
+    if (Test-Path $userTool) { return $userTool }
+    throw 'WiX installation failed; run: dotnet tool install --global wix --version 5.0.2'
+}
+
+function Get-ProjectVersion {
+    $text = Get-Content -Raw (Join-Path $RepoRoot 'CMakeLists.txt')
+    if ($text -match 'project\(\s*Winerose\s+VERSION\s+(\d+\.\d+\.\d+)') { return $Matches[1] }
+    throw 'Could not read the project version from CMakeLists.txt'
+}
+
+function Invoke-Pack {
+    $artefacts = Join-Path $BuildDir "src\plugin\Winerose_artefacts\$Config"
+    $vst3 = Join-Path $artefacts 'VST3\Winerose.vst3'
+    $clap = Join-Path $artefacts 'CLAP\Winerose.clap'
+    $exe  = Join-Path $artefacts 'Standalone\Winerose.exe'
+    foreach ($required in @($vst3, $clap, $exe)) {
+        if (-not (Test-Path $required)) { throw "Missing build output: $required" }
+    }
+    $version = Get-ProjectVersion
+    $packed = Join-Path $RepoRoot 'packed'
+    Write-Host "==> Packing Winerose $version into $packed" -ForegroundColor Cyan
+    if (Test-Path $packed) { Get-ChildItem -Force $packed | Remove-Item -Recurse -Force }
+    New-Item -ItemType Directory -Force $packed | Out-Null
+
+    Copy-Item -Recurse -Force $vst3 (Join-Path $packed 'Winerose.vst3')
+
+    $wix = Get-Wix
+    $msi = Join-Path $packed "Winerose-$version-x64.msi"
+    $wixArgs = @('build', (Join-Path $RepoRoot 'installer\Winerose.wxs'), '-arch', 'x64',
+                 '-d', "Version=$version", '-d', "Vst3Dir=$vst3", '-d', "ClapFile=$clap", '-d', "StandaloneExe=$exe",
+                 '-o', $msi)
+    Invoke-Checked 'Build MSI' { & $wix @wixArgs }
+    Remove-Item -Force -ErrorAction SilentlyContinue ([IO.Path]::ChangeExtension($msi, '.wixpdb'))
+
+    Write-Host 'Packed:' -ForegroundColor Green
+    Get-ChildItem $packed | ForEach-Object { Write-Host "  $($_.Name)" -ForegroundColor Green }
+}
+
 $minimum = if ($Preset -like 'vs2026*') { [version]'4.2.0' } else { [version]'3.25.0' }
 $cmake = Find-CMake $minimum
 $ctest = Join-Path (Split-Path -Parent $cmake) 'ctest.exe'
@@ -109,6 +164,15 @@ try {
         $ctestArgs = @('--test-dir', $BuildDir, '-C', $Config, '--output-on-failure')
         if ($SkipBenchmark) { $ctestArgs += @('-LE', 'benchmark') }
         Invoke-Checked "Test ($Config)"  { & $ctest @ctestArgs }
+    }
+    if (-not $SkipPackage) {
+        if ($Preset -like '*-core') {
+            Write-Host 'Packing skipped: core presets build no plugin.' -ForegroundColor Yellow
+        } elseif ($Config -eq 'Debug') {
+            Write-Host 'Packing skipped: Debug builds are not shipped (use -Config Release).' -ForegroundColor Yellow
+        } else {
+            Invoke-Pack
+        }
     }
 } finally {
     Pop-Location

@@ -673,3 +673,19 @@ measure_host round-trip test covers.
   the whole table is re-read when the type, a path, embedded data, or the whole patch changes.
 - Sample-based oscillators keep their overview display.
 - Build: zlib's own tests/shared lib/install are disabled (its tests had joined our ctest run).
+
+---
+
+## 13. `feature/packaging`: build script → packed\ (MSI + VST3)
+
+`.\scripts\build.ps1` (no flags) configures, builds, runs every test, then packs `packed\`:
+
+    packed\Winerose-<version>-x64.msi     installer (version from project() in CMakeLists.txt)
+    packed\Winerose.vst3\                 the VST3 bundle, ready to copy into a VST3 folder
+
+The MSI (`installer\Winerose.wxs`, WiX Toolset 5) installs per machine: the VST3 bundle to
+`C:\Program Files\Common Files\VST3\Winerose.vst3` (required), the CLAP to `Common Files\CLAP` and the
+Standalone app to `Program Files\Winerose` with a Start-menu shortcut (both optional, on by default). A fixed
+UpgradeCode makes newer versions replace older ones. The script finds `wix` (or installs WiX 5.0.2 as a .NET
+global tool), skips packing for Debug and core presets, and `-SkipPackage` turns it off. Verified with an
+administrative install (`msiexec /a`), which unpacked exactly that layout.
