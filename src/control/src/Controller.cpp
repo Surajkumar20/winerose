@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cmath>
+#include <functional>
 #include <cstdio>
 #include <cstdlib>
 #include <optional>
@@ -327,11 +328,23 @@ void Controller::reloadAssets(std::vector<std::string>& warnings)
         for (int kind = 0; kind < 3; ++kind) {
             const std::string path = reg->get<std::string>(kKeys[kind]);
             std::string& loaded = m_assetPaths[static_cast<std::size_t>(o)][static_cast<std::size_t>(kind)];
-            if (path == loaded) continue;
+            if (kind == 0 && path.empty()) {   // identity of an embedded table = hash of its data
+                const std::string id = "data:" + std::to_string(std::hash<std::string>{}(reg->get<std::string>(modules::osc_keys::wavetableData)));
+                if (id == loaded) continue;
+            } else if (path == loaded) {
+                continue;
+            }
             loaded = path;
             std::string error;
             if (kind == 0) {
-                if (path.empty()) { m_engine.setOscillatorTable(o, dsp::makeBasicShapesTable()); continue; }
+                if (path.empty()) {   // embedded table from an import, else the built-in shapes
+                    const std::string data = reg->get<std::string>(modules::osc_keys::wavetableData);
+                    std::shared_ptr<const dsp::WavetableBank> t;
+                    if (!data.empty() && !(t = control::decodeWavetable(data, "Embedded", error))) warnings.push_back("embedded wavetable: " + error);
+                    m_engine.setOscillatorTable(o, t ? std::move(t) : dsp::makeBasicShapesTable());
+                    loaded = "data:" + std::to_string(std::hash<std::string>{}(data));
+                    continue;
+                }
                 if (auto t = control::loadWavetableFile(path, error)) m_engine.setOscillatorTable(o, std::move(t));
                 else warnings.push_back("wavetable " + path + ": " + error);
             } else if (kind == 1) {
@@ -412,6 +425,7 @@ Result Controller::loadOscillatorFile(int oscillator, const std::string& path)
             const int frames = t->frameCount();
             m_engine.setOscillatorTable(oscillator, std::move(t));
             reg->set<std::string>(modules::osc_keys::wavetablePath, path);
+            reg->set<std::string>(modules::osc_keys::wavetableData, std::string());
             loaded[0] = path;
             reg->set<double>(modules::osc_keys::type, static_cast<double>(modules::OscType::Wavetable));
             result = Result::success("Loaded a " + std::to_string(frames) + "-frame wavetable");
@@ -448,6 +462,15 @@ Result Controller::loadPreset(std::span<const std::uint8_t> bytes)
         std::string error;
         if (auto wt = presets::Wavetable::read(bytes, error)) {
             m_engine.setOscillatorTable(0, dsp::WavetableBank::build(wt->samples, wt->frameSize, "Imported"));
+            if (auto* reg = m_config->findParamRegistry("Oscillator0")) {   // keep it with the patch
+                const std::string data = control::encodeWavetable(wt->samples, wt->frameSize);
+                m_config->beginBatch();
+                reg->set<std::string>(modules::osc_keys::wavetablePath, std::string());
+                reg->set<std::string>(modules::osc_keys::wavetableData, data);
+                reg->set<double>(modules::osc_keys::type, 0.0);
+                m_config->endBatch();
+                m_assetPaths[0][0] = "data:" + std::to_string(std::hash<std::string>{}(data));
+            }
             return Result::success("Loaded a " + std::to_string(wt->frameCount) + "-frame wavetable on oscillator A");
         }
         return Result::failure("unrecognized preset format");
@@ -472,12 +495,18 @@ Result Controller::loadPreset(std::span<const std::uint8_t> bytes)
 
     for (const auto& w : report.wavetables) {
         m_engine.setOscillatorTable(w.oscillator, dsp::WavetableBank::build(w.table.samples, w.table.frameSize, w.table.name));
-        // A wavetable found on disk is remembered (embedded ones only live in the engine until saved as files).
-        if (w.source.rfind("embedded", 0) != 0)
-            if (auto* reg = m_config->findParamRegistry("Oscillator" + std::to_string(w.oscillator))) {
+        // Remember the table with the patch: a file found on disk by path, an embedded one by its data.
+        if (auto* reg = m_config->findParamRegistry("Oscillator" + std::to_string(w.oscillator))) {
+            auto& loaded = m_assetPaths[static_cast<std::size_t>(w.oscillator)][0];
+            if (w.source.rfind("embedded", 0) != 0) {
                 reg->set<std::string>(modules::osc_keys::wavetablePath, w.source);
-                m_assetPaths[static_cast<std::size_t>(w.oscillator)][0] = w.source;
+                loaded = w.source;
+            } else {
+                const std::string data = control::encodeWavetable(w.table.samples, w.table.frameSize);
+                reg->set<std::string>(modules::osc_keys::wavetableData, data);
+                loaded = "data:" + std::to_string(std::hash<std::string>{}(data));
             }
+        }
     }
     m_history.clear();
     m_lastImport = report.toJson();

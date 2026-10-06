@@ -127,6 +127,7 @@ OscillatorModule::OscillatorModule(std::shared_ptr<ConfigManager> config, int in
     r.registerString(osc_keys::wavetablePath, "", gt, "Wavetable file (empty: built-in or embedded)");
     r.registerString(osc_keys::samplePath, "", gt, "Sample file for Sample / Granular / Spectral");
     r.registerString(osc_keys::multisamplePath, "", gt, "SFZ instrument for Multisample");
+    r.registerString(osc_keys::wavetableData, "", gt, "Embedded wavetable (from an imported preset), used when no file is set");
 
     m_i.enabled = t.add(r, osc_keys::enabled);       m_i.level = t.add(r, osc_keys::level);
     m_i.pan = t.add(r, osc_keys::pan);               m_i.octave = t.add(r, osc_keys::octave);

@@ -297,3 +297,29 @@ TEST_CASE("another synth's .fxp is refused and leaves the patch alone", "[preset
     CHECK(r.error.find("not a Serum preset") != std::string::npos);
     CHECK(f.ctl.get("Filter0.cutoff").number() == Approx(1234.0));
 }
+
+TEST_CASE("wavetables embedded in an imported preset survive save and reload", "[presets][import][wavetable]")
+{
+    Wavetable embedded;
+    embedded.samples = sawFrames(3, 2048);
+    embedded.frameCount = 3;
+    const auto wav = embedded.write();
+    nlohmann::json root;
+    root["Oscillator1"]["plainParams"] = {{"kParamEnable", 1.0}};
+    root["Oscillator1"]["blob"] = nlohmann::json::binary(std::vector<std::uint8_t>(wav.begin(), wav.end()));
+
+    Fixture a;
+    REQUIRE(a.ctl.loadPreset(makeSerum2(root).write()).ok);
+    REQUIRE(a.engine.oscillatorTable(1)->frameCount() == 3);
+    const std::string state = a.ctl.saveState();
+    CHECK(state.find("wt1:2048:") != std::string::npos);
+
+    Fixture b;
+    REQUIRE(b.engine.oscillatorTable(1)->frameCount() != 3);
+    REQUIRE(b.ctl.loadState(state).ok);
+    CHECK(b.engine.oscillatorTable(1)->frameCount() == 3);
+    // ...and a patch without it goes back to the built-in table.
+    Fixture blank;
+    REQUIRE(b.ctl.loadState(blank.ctl.saveState()).ok);
+    CHECK(b.engine.oscillatorTable(1)->frameCount() != 3);
+}

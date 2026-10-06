@@ -4,6 +4,9 @@
 #include "presets/WavetableWav.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <cstdlib>
+#include <functional>
 #include <cmath>
 #include <map>
 
@@ -57,6 +60,61 @@ std::shared_ptr<const dsp::WavetableBank> loadWavetableFile(const std::filesyste
     const auto wt = presets::Wavetable::readFile(file, error);
     if (!wt) return nullptr;
     return dsp::WavetableBank::build(wt->samples, wt->frameSize, wt->name);
+}
+
+namespace {
+constexpr char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+}
+
+std::string encodeWavetable(const std::vector<float>& samples, int frameSize)
+{
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve(samples.size() * 2);
+    for (float v : samples) {
+        const auto s = static_cast<std::int16_t>(std::lround(std::clamp(v, -1.0f, 1.0f) * 32767.0f));
+        bytes.push_back(static_cast<std::uint8_t>(s & 0xFF));
+        bytes.push_back(static_cast<std::uint8_t>((s >> 8) & 0xFF));
+    }
+    std::string out = "wt1:" + std::to_string(frameSize) + ":";
+    out.reserve(out.size() + (bytes.size() + 2) / 3 * 4);
+    for (std::size_t i = 0; i < bytes.size(); i += 3) {
+        const std::uint32_t n = (static_cast<std::uint32_t>(bytes[i]) << 16)
+                              | (i + 1 < bytes.size() ? static_cast<std::uint32_t>(bytes[i + 1]) << 8 : 0u)
+                              | (i + 2 < bytes.size() ? static_cast<std::uint32_t>(bytes[i + 2]) : 0u);
+        out.push_back(kB64[(n >> 18) & 63]);
+        out.push_back(kB64[(n >> 12) & 63]);
+        out.push_back(i + 1 < bytes.size() ? kB64[(n >> 6) & 63] : '=');
+        out.push_back(i + 2 < bytes.size() ? kB64[n & 63] : '=');
+    }
+    return out;
+}
+
+std::shared_ptr<const dsp::WavetableBank> decodeWavetable(const std::string& text, const std::string& name, std::string& error)
+{
+    if (text.rfind("wt1:", 0) != 0) { error = "unknown embedded wavetable format"; return nullptr; }
+    const auto colon = text.find(':', 4);
+    if (colon == std::string::npos) { error = "malformed embedded wavetable"; return nullptr; }
+    const int frameSize = std::atoi(text.substr(4, colon - 4).c_str());
+    if (frameSize < 16 || frameSize > 8192) { error = "bad frame size"; return nullptr; }
+    int lookup[256];
+    std::fill(std::begin(lookup), std::end(lookup), -1);
+    for (int i = 0; i < 64; ++i) lookup[static_cast<unsigned char>(kB64[i])] = i;
+    std::vector<std::uint8_t> bytes;
+    std::uint32_t acc = 0;
+    int bits = 0;
+    for (std::size_t i = colon + 1; i < text.size(); ++i) {
+        const int v = lookup[static_cast<unsigned char>(text[i])];
+        if (v < 0) continue;   // '=' padding / whitespace
+        acc = (acc << 6) | static_cast<std::uint32_t>(v);
+        bits += 6;
+        if (bits >= 8) { bits -= 8; bytes.push_back(static_cast<std::uint8_t>((acc >> bits) & 0xFF)); }
+    }
+    std::vector<float> samples(bytes.size() / 2);
+    for (std::size_t i = 0; i < samples.size(); ++i)
+        samples[i] = static_cast<float>(static_cast<std::int16_t>(bytes[2 * i] | (bytes[2 * i + 1] << 8))) / 32767.0f;
+    if (samples.size() < static_cast<std::size_t>(frameSize)) { error = "embedded wavetable is empty"; return nullptr; }
+    samples.resize(samples.size() / static_cast<std::size_t>(frameSize) * static_cast<std::size_t>(frameSize));
+    return dsp::WavetableBank::build(samples, frameSize, name);
 }
 
 std::shared_ptr<const dsp::Multisample> buildMultisample(const presets::SfzFile& sfz, const std::filesystem::path& baseDir,

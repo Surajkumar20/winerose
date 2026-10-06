@@ -116,6 +116,7 @@ inline constexpr const char* spcTransients = "spcTransients";
 inline constexpr const char* wavetablePath   = "wavetablePath";
 inline constexpr const char* samplePath      = "samplePath";
 inline constexpr const char* multisamplePath = "multisamplePath";
+inline constexpr const char* wavetableData   = "wavetableData";   // embedded table (imports): see control/AssetLoader
 }
 
 class OscillatorModule {

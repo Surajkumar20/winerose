@@ -22,6 +22,10 @@ bool isWavetableFile(const std::filesystem::path& file);
 
 std::shared_ptr<const dsp::WavetableBank> loadWavetableFile(const std::filesystem::path& file, std::string& error);
 
+/** Embedded wavetables in the patch: "wt1:<frameSize>:<base64 of int16 LE samples>". */
+std::string encodeWavetable(const std::vector<float>& samples, int frameSize);
+std::shared_ptr<const dsp::WavetableBank> decodeWavetable(const std::string& text, const std::string& name, std::string& error);
+
 /** SFZ → Multisample: parses, resolves sample paths (default_path, relative to the .sfz), decodes each
  *  sample once. Regions whose sample can't be loaded are skipped and reported in `warnings`. */
 std::shared_ptr<const dsp::Multisample> loadSfzFile(const std::filesystem::path& file, std::string& error,
