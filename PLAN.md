@@ -659,3 +659,17 @@ block) instead of once per block, and the transport position advances per chunk.
 Verified: pluginval strictness 10 SUCCESS, no warnings (editor open / open whilst processing / automation).
 Not verifiable here: FL Studio state recall (no FL install) — the state path is the same JSON chunk the
 measure_host round-trip test covers.
+
+---
+
+## 12. `feature/wavetable-view`: stacked wavetable display
+
+- `IController::wavetablePreview(osc, maxFrames, points)` returns up to `maxFrames` evenly spaced frames of an
+  oscillator's table (first and last included) plus the table's frame count; JSON-serializable for other UIs.
+- `OscView` (oscillator display) for wavetables: **3D** — every sampled frame drawn back to front in an oblique
+  projection (frame 1 front-left, last frame back-right), nearer frames brighter, and the frame at the current
+  WT Pos drawn highlighted at its depth; **2D** — the current frame only. The 2D/3D tag switches; double-click
+  opens a large view (600x340, 96 frames, "Frame n / N" readout). WT Pos changes only re-read the current frame;
+  the whole table is re-read when the type, a path, embedded data, or the whole patch changes.
+- Sample-based oscillators keep their overview display.
+- Build: zlib's own tests/shared lib/install are disabled (its tests had joined our ctest run).

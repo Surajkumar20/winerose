@@ -8,6 +8,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 using namespace winerose;
@@ -242,4 +243,24 @@ TEST_CASE("schema marks modulation targets", "[control]")
     }
     CHECK(cutoff);
     CHECK_FALSE(masterVolume);
+}
+
+TEST_CASE("wavetablePreview samples evenly spaced frames including the first and last", "[control]")
+{
+    Fixture f;
+    std::vector<float> frames(10 * 2048);
+    for (int fr = 0; fr < 10; ++fr)
+        for (int i = 0; i < 2048; ++i) frames[static_cast<std::size_t>(fr * 2048 + i)] = (fr + 1) / 10.0f * std::sin(6.283185307f * i / 2048.0f);
+    f.engine.setOscillatorTable(0, dsp::WavetableBank::build(frames, 2048, "test"));
+    const auto all = f.ctl.wavetablePreview(0, 64, 128);
+    CHECK(all.totalFrames == 10);
+    REQUIRE(all.frames.size() == 10);
+    CHECK(all.frames[0].size() == 128);
+    const auto some = f.ctl.wavetablePreview(0, 4, 64);
+    REQUIRE(some.frameIndex.size() == 4);
+    CHECK(some.frameIndex.front() == 0);
+    CHECK(some.frameIndex.back() == 9);
+    // Frame amplitudes grow from front to back (peak of a quarter-cycle sample).
+    CHECK(some.frames.back()[16] > some.frames.front()[16]);
+    CHECK(f.ctl.wavetablePreview(5, 4, 64).frames.empty());   // no such oscillator
 }

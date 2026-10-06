@@ -272,12 +272,19 @@ void EnvelopeView::paint(juce::Graphics& g)
 
 // --- OscView ---------------------------------------------------------------------------------------------
 
-OscView::OscView(ParamHub& hub, int oscillator) : m_hub(hub), m_osc(oscillator)
+OscView::OscView(ParamHub& hub, int oscillator, bool large) : m_hub(hub), m_osc(oscillator), m_large(large)
 {
     const std::string prefix = "Oscillator" + std::to_string(oscillator) + ".";
     m_anyId = m_hub.onAny([this, prefix](const control::ParamChange& c) {
-        if (c.everything || c.nsKey.rfind(prefix, 0) == 0) triggerAsyncUpdate();
+        if (c.everything) { m_tableDirty = true; triggerAsyncUpdate(); return; }
+        if (c.nsKey.rfind(prefix, 0) != 0) return;
+        const std::string key = c.nsKey.substr(prefix.size());
+        // Moving the position only needs the current frame; anything that can swap the table needs all of it.
+        if (key == "type" || key == "wavetablePath" || key == "wavetableData" || key == "samplePath" || key == "multisamplePath")
+            m_tableDirty = true;
+        if (key == "wtPos" || m_tableDirty || key == "enabled") triggerAsyncUpdate();
     });
+    setTooltip(large ? juce::String() : juce::String("Click 2D/3D to switch views; double-click to enlarge"));
     handleAsyncUpdate();
 }
 
@@ -291,8 +298,31 @@ void OscView::handleAsyncUpdate()
 {
     const auto type = static_cast<int>(std::lround(m_hub.number("Oscillator" + std::to_string(m_osc) + ".type")));
     m_isSample = type != 0;
-    m_data = m_hub.controller().oscillatorPreview(m_osc, m_isSample ? 256 : 512);
+    const int points = m_large ? 512 : 256;
+    m_current = m_hub.controller().oscillatorPreview(m_osc, m_isSample ? points / 2 : points);
+    if (!m_isSample && m_tableDirty) m_table = m_hub.controller().wavetablePreview(m_osc, m_large ? 96 : 48, m_large ? 256 : 128);
+    m_tableDirty = false;
     repaint();
+}
+
+juce::Rectangle<float> OscView::modeTag() const
+{
+    const auto r = getLocalBounds().toFloat().reduced(4.0f, 2.0f);
+    return {r.getRight() - 26.0f, r.getY() + 2.0f, 24.0f, 14.0f};
+}
+
+void OscView::mouseUp(const juce::MouseEvent& e)
+{
+    if (!m_isSample && modeTag().expanded(3.0f).contains(e.position) && e.getNumberOfClicks() == 1) setThreeD(!m_threeD);
+}
+
+void OscView::mouseDoubleClick(const juce::MouseEvent& e)
+{
+    if (m_large || modeTag().expanded(3.0f).contains(e.position)) return;
+    auto big = std::make_unique<OscView>(m_hub, m_osc, true);
+    big->setThreeD(m_threeD);
+    big->setSize(600, 340);
+    juce::CallOutBox::launchAsynchronously(std::move(big), getScreenBounds(), nullptr);
 }
 
 void OscView::paint(juce::Graphics& g)
@@ -300,35 +330,95 @@ void OscView::paint(juce::Graphics& g)
     const auto r = getLocalBounds().toFloat().reduced(4.0f, 2.0f);
     g.setColour(colours::background);
     g.fillRoundedRectangle(r, 4.0f);
-    g.setColour(colours::edge);
-    g.drawHorizontalLine(static_cast<int>(r.getCentreY()), r.getX(), r.getRight());
-    if (m_data.empty()) {
+    const bool on = m_large || m_hub.number("Oscillator" + std::to_string(m_osc) + ".enabled") >= 0.5;
+
+    if (m_current.empty()) {
         g.setColour(colours::textDim);
         g.setFont(juce::FontOptions(11.5f));
         g.drawText(m_isSample ? "Load a sample or SFZ" : "", r, juce::Justification::centred);
         return;
     }
-    const bool on = m_hub.number("Oscillator" + std::to_string(m_osc) + ".enabled") >= 0.5;
-    const auto colour = on ? colours::accent : colours::accentDim;
-    const float half = r.getHeight() * 0.45f;
     if (m_isSample) {
+        const auto colour = on ? colours::accent : colours::accentDim;
+        const float half = r.getHeight() * 0.45f;
         g.setColour(colour.withAlpha(0.8f));
-        const float w = r.getWidth() / static_cast<float>(m_data.size());
-        for (std::size_t i = 0; i < m_data.size(); ++i) {
-            const float h = std::max(0.5f, m_data[i] * half);
+        const float w = r.getWidth() / static_cast<float>(m_current.size());
+        for (std::size_t i = 0; i < m_current.size(); ++i) {
+            const float h = std::max(0.5f, m_current[i] * half);
             g.fillRect(r.getX() + static_cast<float>(i) * w, r.getCentreY() - h, std::max(1.0f, w - 0.5f), 2.0f * h);
         }
         return;
     }
+
+    const auto inner = r.reduced(m_large ? 14.0f : 3.0f, m_large ? 12.0f : 3.0f);
+    if (m_threeD && m_table.frames.size() > 1) paintStack(g, inner, on);
+    else paintFlat(g, inner, on);
+
+    // Mode tag, and the frame readout in the large view.
+    const auto tag = modeTag();
+    g.setColour(colours::panelHi);
+    g.fillRoundedRectangle(tag, 3.0f);
+    g.setColour(colours::gold);
+    g.setFont(juce::FontOptions(10.5f, juce::Font::bold));
+    g.drawText(m_threeD ? "3D" : "2D", tag, juce::Justification::centred);
+    if (m_large && m_table.totalFrames > 0) {
+        const double pos = m_hub.number("Oscillator" + std::to_string(m_osc) + ".wtPos");
+        const int frame = static_cast<int>(std::lround(pos * (m_table.totalFrames - 1))) + 1;
+        g.setColour(colours::textDim);
+        g.setFont(juce::FontOptions(12.0f));
+        g.drawText("Frame " + juce::String(frame) + " / " + juce::String(m_table.totalFrames), r.reduced(10.0f, 6.0f),
+                   juce::Justification::topLeft);
+    }
+}
+
+void OscView::paintFlat(juce::Graphics& g, juce::Rectangle<float> r, bool on)
+{
+    g.setColour(colours::edge);
+    g.drawHorizontalLine(static_cast<int>(r.getCentreY()), r.getX(), r.getRight());
     juce::Path p;
-    for (std::size_t i = 0; i < m_data.size(); ++i) {
-        const float x = r.getX() + r.getWidth() * static_cast<float>(i) / static_cast<float>(m_data.size() - 1);
-        const float y = r.getCentreY() - std::clamp(m_data[i], -1.0f, 1.0f) * half;
+    const float half = r.getHeight() * 0.48f;
+    for (std::size_t i = 0; i < m_current.size(); ++i) {
+        const float x = r.getX() + r.getWidth() * static_cast<float>(i) / static_cast<float>(m_current.size() - 1);
+        const float y = r.getCentreY() - std::clamp(m_current[i], -1.0f, 1.0f) * half;
         if (i == 0) p.startNewSubPath(x, y);
         else p.lineTo(x, y);
     }
-    g.setColour(colour);
-    g.strokePath(p, juce::PathStrokeType(1.8f));
+    g.setColour(on ? colours::accent : colours::accentDim);
+    g.strokePath(p, juce::PathStrokeType(m_large ? 2.4f : 1.8f));
+}
+
+void OscView::paintStack(juce::Graphics& g, juce::Rectangle<float> r, bool on)
+{
+    // Frame 1 at the front-left bottom, the last frame at the back-right top (an oblique projection).
+    const float depthX = r.getWidth() * 0.26f, depthY = r.getHeight() * 0.42f;
+    const float waveW = r.getWidth() - depthX;
+    const float amp = (r.getHeight() - depthY) * 0.46f;
+    const int last = std::max(1, m_table.totalFrames - 1);
+    auto framePath = [&](const std::vector<float>& data, float t) {
+        juce::Path p;
+        const float x0 = r.getX() + t * depthX;
+        const float yc = r.getBottom() - amp - t * depthY;
+        for (std::size_t i = 0; i < data.size(); ++i) {
+            const float x = x0 + waveW * static_cast<float>(i) / static_cast<float>(data.size() - 1);
+            const float y = yc - std::clamp(data[i], -1.0f, 1.0f) * amp;
+            if (i == 0) p.startNewSubPath(x, y);
+            else p.lineTo(x, y);
+        }
+        return p;
+    };
+    const auto base = on ? colours::gold : colours::textDim;
+    for (int j = static_cast<int>(m_table.frames.size()) - 1; j >= 0; --j) {
+        const float t = static_cast<float>(m_table.frameIndex[static_cast<std::size_t>(j)]) / static_cast<float>(last);
+        g.setColour(base.withAlpha(0.10f + 0.30f * (1.0f - t)));   // nearer frames read stronger
+        g.strokePath(framePath(m_table.frames[static_cast<std::size_t>(j)], t), juce::PathStrokeType(m_large ? 1.1f : 0.8f));
+    }
+    // The frame being played, at its depth.
+    const float t = static_cast<float>(std::clamp(m_hub.number("Oscillator" + std::to_string(m_osc) + ".wtPos"), 0.0, 1.0));
+    const auto current = framePath(m_current, t);
+    g.setColour((on ? colours::accent : colours::accentDim).withAlpha(0.35f));
+    g.strokePath(current, juce::PathStrokeType(m_large ? 6.0f : 4.0f));
+    g.setColour(on ? colours::accent.brighter(0.3f) : colours::accentDim);
+    g.strokePath(current, juce::PathStrokeType(m_large ? 2.4f : 1.7f));
 }
 
 } // namespace winerose::ui

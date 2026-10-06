@@ -116,7 +116,7 @@ OscPanel::OscPanel(ParamHub& hub, int index, std::function<void(const juce::Stri
     m_anyId = m_hub.onAny([this](const control::ParamChange& c) {
         if (c.everything || c.nsKey.rfind(m_module + ".", 0) == 0) updateFileName();
     });
-    setTop(&m_view, 44);   // after the header widgets exist (it lays the panel out)
+    setTop(&m_view, 58);   // after the header widgets exist (it lays the panel out)
     handleAsyncUpdate();
 }
 

@@ -66,18 +66,33 @@ private:
     int m_anyId = 0;
 };
 
-/** Oscillator display: the current wavetable frame, or the loaded sample's overview. */
-class OscView final : public juce::Component, private juce::AsyncUpdater {
+/**
+ * @brief Oscillator display. Wavetable oscillators: a stacked "3D" view of the whole table (frames drawn back to
+ *        front, the frame at the current WT Pos highlighted) or a flat 2D view of the current frame; click the
+ *        2D/3D tag to switch, double-click to open a large view. Sample-based oscillators: the sample overview.
+ */
+class OscView final : public juce::Component, public juce::SettableTooltipClient, private juce::AsyncUpdater {
 public:
-    OscView(ParamHub& hub, int oscillator);
+    OscView(ParamHub& hub, int oscillator, bool large = false);
     ~OscView() override;
     void paint(juce::Graphics&) override;
+    void mouseUp(const juce::MouseEvent&) override;
+    void mouseDoubleClick(const juce::MouseEvent&) override;
+    void setThreeD(bool on) { m_threeD = on; repaint(); }
 
 private:
     void handleAsyncUpdate() override;
+    juce::Rectangle<float> modeTag() const;
+    void paintStack(juce::Graphics&, juce::Rectangle<float> r, bool on);
+    void paintFlat(juce::Graphics&, juce::Rectangle<float> r, bool on);
+
     ParamHub& m_hub;
     int m_osc;
-    std::vector<float> m_data;
+    bool m_large;
+    bool m_threeD = true;
+    bool m_tableDirty = true;      // re-read the whole table (vs only the current frame)
+    std::vector<float> m_current;  // current frame (wavetables) or sample overview
+    control::WavetablePreview m_table;
     bool m_isSample = false;
     int m_anyId = 0;
 };

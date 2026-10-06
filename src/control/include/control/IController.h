@@ -89,6 +89,9 @@ public:
     /** For displays: oscillator A/B/C's current wavetable frame (`points` samples, -1..1), or for sample-based
      *  types the loaded sample's peak envelope (`points` values, 0..1). Empty if nothing is loaded. */
     virtual std::vector<float> oscillatorPreview(int oscillator, int points) const = 0;
+    /** For the stacked (3D-style) wavetable display: up to `maxFrames` evenly spaced frames of oscillator
+     *  A/B/C's wavetable, including the first and last. Empty when no table is installed. */
+    virtual WavetablePreview wavetablePreview(int oscillator, int maxFrames, int points) const = 0;
 
     // --- Undo ---
     virtual bool undo() = 0;

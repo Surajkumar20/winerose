@@ -8,7 +8,8 @@ if(MSVC)
     target_compile_options(ui_snapshot PRIVATE /utf-8)
 endif()
 target_link_libraries(ui_snapshot
-    PRIVATE winerose_ui_juce winerose_control winerose_engine winerose_params
+    PRIVATE winerose_ui_juce winerose_control winerose_engine winerose_params winerose_presets
             juce::juce_audio_processors juce::juce_audio_utils juce::juce_gui_basics
     PUBLIC  juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+target_include_directories(ui_snapshot PRIVATE "${CMAKE_SOURCE_DIR}/src/ui/src")   # renders internal views too
 set_target_properties(ui_snapshot PROPERTIES FOLDER "Winerose/Tools")

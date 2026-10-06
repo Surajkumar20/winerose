@@ -9,7 +9,14 @@
 #include "control/Controller.h"
 #include "engine/Engine.h"
 #include "params/ConfigManager.h"
+#include "presets/WavetableWav.h"
 #include "ui/WineroseEditor.h"
+#include "Theme.h"
+#include "Visuals.h"
+#include "Widgets.h"
+
+#include <cmath>
+#include <fstream>
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -79,6 +86,25 @@ int main(int argc, char** argv)
         const auto r = controller.loadOscillatorFile(1, sample.toStdString());
         std::cout << "sample: " << (r.ok ? r.message : r.error) << "\n";
     }
+    {   // A 64-frame table that morphs from a sine into a bright saw, on OSC A (shows the stacked view).
+        winerose::presets::Wavetable wt;
+        wt.frameCount = 64;
+        wt.samples.resize(64 * 2048);
+        for (int f = 0; f < 64; ++f) {
+            const int harmonics = 1 + f * f / 40;
+            for (int i = 0; i < 2048; ++i) {
+                double v = 0.0;
+                for (int h = 1; h <= harmonics; ++h) v += std::sin(2.0 * 3.14159265358979 * h * i / 2048.0) / h;
+                wt.samples[static_cast<std::size_t>(f * 2048 + i)] = static_cast<float>(0.55 * v);
+            }
+        }
+        const auto file = out.getChildFile("morph.wav");
+        const auto bytes = wt.write();
+        file.replaceWithData(bytes.data(), bytes.size());
+        const auto r = controller.loadOscillatorFile(0, file.getFullPathName().toStdString());
+        std::cout << "wavetable: " << (r.ok ? r.message : r.error) << "\n";
+        controller.set("Oscillator0.wtPos", 0.4);
+    }
     controller.set("Oscillator2.type", 3.0);   // granular, to show a third layout
     controller.set("FXRack0Slot0.type", 9.0);  // an EQ in slot 1
     controller.set("FXRack0Slot0.enabled", 1.0);
@@ -105,6 +131,24 @@ int main(int argc, char** argv)
         juce::FileOutputStream stream(file);
         juce::PNGImageFormat().writeImageToStream(image, stream);
         std::cout << file.getFullPathName() << "\n";
+    }
+    {   // The large (double-click) wavetable view, both modes.
+        winerose::ui::Theme theme;
+        winerose::ui::ParamHub hub(controller);
+        for (const bool threeD : {true, false}) {
+            winerose::ui::OscView big(hub, 0, true);
+            big.setLookAndFeel(&theme);
+            big.setThreeD(threeD);
+            big.setSize(600, 340);
+            pump();
+            const auto image = big.createComponentSnapshot(big.getLocalBounds(), true, 1.0f);
+            const auto file = out.getChildFile(threeD ? "Wavetable_3D.png" : "Wavetable_2D.png");
+            file.deleteFile();
+            juce::FileOutputStream stream(file);
+            juce::PNGImageFormat().writeImageToStream(image, stream);
+            big.setLookAndFeel(nullptr);
+            std::cout << file.getFullPathName() << "\n";
+        }
     }
     return 0;
 }

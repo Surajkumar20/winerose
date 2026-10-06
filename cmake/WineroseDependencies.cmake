@@ -25,6 +25,9 @@ FetchContent_MakeAvailable(zstd)
 set(_winerose_saved_policy_min "${CMAKE_POLICY_VERSION_MINIMUM}")
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(ZLIB_BUILD_TESTING  OFF CACHE BOOL "" FORCE)   # zlib's own tests would join our ctest run
+set(ZLIB_BUILD_SHARED   OFF CACHE BOOL "" FORCE)
+set(ZLIB_INSTALL        OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(zlib
     GIT_REPOSITORY https://github.com/madler/zlib.git
     GIT_TAG        v1.3.2

@@ -81,4 +81,9 @@ inline void to_json(nlohmann::json& j, const MeterSnapshot& m)
     j = nlohmann::json{{"peakLeft", m.peakLeft}, {"peakRight", m.peakRight}};
 }
 
+inline void to_json(nlohmann::json& j, const WavetablePreview& w)
+{
+    j = nlohmann::json{{"totalFrames", w.totalFrames}, {"frameIndex", w.frameIndex}, {"frames", w.frames}};
+}
+
 } // namespace winerose::control

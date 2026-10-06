@@ -58,6 +58,7 @@ public:
     std::string importReport() const override { return m_lastImport; }
     Result      loadOscillatorFile(int oscillator, const std::string& path) override;
     std::vector<float> oscillatorPreview(int oscillator, int points) const override;
+    WavetablePreview wavetablePreview(int oscillator, int maxFrames, int points) const override;
     bool        undo() override;
     bool        redo() override;
     bool        canUndo() const override { return m_history.canUndo(); }

@@ -393,6 +393,25 @@ std::vector<float> Controller::oscillatorPreview(int oscillator, int points) con
     return out;
 }
 
+WavetablePreview Controller::wavetablePreview(int oscillator, int maxFrames, int points) const
+{
+    WavetablePreview out;
+    if (oscillator < 0 || oscillator >= modules::OscillatorModule::kCount || points < 2 || points > 4096 || maxFrames < 1) return out;
+    const auto* table = m_engine.oscillatorTable(oscillator);
+    if (table == nullptr) return out;
+    out.totalFrames = table->frameCount();
+    const int count = std::min(std::min(maxFrames, 256), out.totalFrames);
+    for (int j = 0; j < count; ++j) {
+        const int index = count == 1 ? 0 : static_cast<int>(std::lround(static_cast<double>(j) * (out.totalFrames - 1) / (count - 1)));
+        const auto fp = table->resolveFrame(static_cast<float>(index));
+        std::vector<float> frame(static_cast<std::size_t>(points));
+        for (int i = 0; i < points; ++i) frame[static_cast<std::size_t>(i)] = table->read(static_cast<double>(i) / points, fp, {0, 0.0f});
+        out.frameIndex.push_back(index);
+        out.frames.push_back(std::move(frame));
+    }
+    return out;
+}
+
 Result Controller::loadOscillatorFile(int oscillator, const std::string& path)
 {
     if (oscillator < 0 || oscillator >= modules::OscillatorModule::kCount) return Result::failure("no such oscillator");

@@ -62,6 +62,13 @@ struct Result {
     static Result failure(std::string why) { return {false, std::move(why), {}}; }
 };
 
+/** Frames of an oscillator's wavetable for displays (a sampled subset when the table is large). */
+struct WavetablePreview {
+    int totalFrames = 0;                       // frames in the table
+    std::vector<int> frameIndex;               // which table frame each entry of `frames` is
+    std::vector<std::vector<float>> frames;    // `points` samples each, -1..1
+};
+
 struct MeterSnapshot {
     float peakLeft  = 0.0f;
     float peakRight = 0.0f;
