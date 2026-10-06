@@ -24,7 +24,7 @@ WineroseEditor::WineroseEditor(juce::AudioProcessor& processor, control::IContro
     addAndMakeVisible(m_redo);
 
     m_load.onClick = [this] {
-        m_chooser = std::make_unique<juce::FileChooser>("Load a preset", juce::File(), "*.SerumPreset;*.fxp;*.fxb;*.json;*.wav");
+        m_chooser = std::make_unique<juce::FileChooser>("Load a preset", juce::File(), "*.SerumPreset;*.fxp;*.fxb;*.json;*.wav;*.sfz");
         m_chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                                [this](const juce::FileChooser& fc) {
                                    if (fc.getResult().existsAsFile()) loadFile(fc.getResult());
@@ -181,7 +181,7 @@ bool WineroseEditor::isInterestedInFileDrag(const juce::StringArray& files)
 {
     for (const auto& f : files)
         if (f.endsWithIgnoreCase(".SerumPreset") || f.endsWithIgnoreCase(".fxp") || f.endsWithIgnoreCase(".fxb")
-            || f.endsWithIgnoreCase(".json") || f.endsWithIgnoreCase(".wav"))
+            || f.endsWithIgnoreCase(".json") || f.endsWithIgnoreCase(".wav") || f.endsWithIgnoreCase(".sfz"))
             return true;
     return false;
 }
@@ -193,6 +193,13 @@ void WineroseEditor::filesDropped(const juce::StringArray& files, int, int)
 
 void WineroseEditor::loadFile(const juce::File& file)
 {
+    if (file.hasFileExtension("wav;sfz")) {   // onto oscillator A: wavetable, sample or SFZ instrument
+        const auto r = m_controller.loadOscillatorFile(0, file.getFullPathName().toStdString());
+        m_status.setText(r.ok ? juce::String(r.message) + " on oscillator A" : "Could not load " + file.getFileName() + ": " + juce::String(r.error),
+                         juce::dontSendNotification);
+        refreshAll();
+        return;
+    }
     juce::MemoryBlock data;
     if (!file.loadFileAsData(data)) {
         m_status.setText("Cannot read " + file.getFileName(), juce::dontSendNotification);

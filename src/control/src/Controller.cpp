@@ -5,6 +5,7 @@
 #include "params/ConfigManager.h"
 #include "params/ParamRegistry.h"
 #include "presets/PresetFormat.h"
+#include "AssetLoader.h"
 #include "presets/SerumImport.h"
 
 #include <array>
@@ -267,7 +268,98 @@ Result Controller::loadState(const std::string& state)
     m_config->endBatch();
 
     m_history.clear();
-    return Result::success();
+    std::vector<std::string> warnings;
+    reloadAssets(warnings);
+    std::string message;
+    for (const auto& w : warnings) message += (message.empty() ? "" : "; ") + w;
+    return Result::success(message);
+}
+
+void Controller::reloadAssets(std::vector<std::string>& warnings)
+{
+    static constexpr const char* kKeys[3] = {modules::osc_keys::wavetablePath, modules::osc_keys::samplePath,
+                                             modules::osc_keys::multisamplePath};
+    for (int o = 0; o < modules::OscillatorModule::kCount; ++o) {
+        auto* reg = m_config->findParamRegistry("Oscillator" + std::to_string(o));
+        if (reg == nullptr) continue;
+        for (int kind = 0; kind < 3; ++kind) {
+            const std::string path = reg->get<std::string>(kKeys[kind]);
+            std::string& loaded = m_assetPaths[static_cast<std::size_t>(o)][static_cast<std::size_t>(kind)];
+            if (path == loaded) continue;
+            loaded = path;
+            std::string error;
+            if (kind == 0) {
+                if (path.empty()) { m_engine.setOscillatorTable(o, dsp::makeBasicShapesTable()); continue; }
+                if (auto t = control::loadWavetableFile(path, error)) m_engine.setOscillatorTable(o, std::move(t));
+                else warnings.push_back("wavetable " + path + ": " + error);
+            } else if (kind == 1) {
+                std::shared_ptr<const dsp::SampleData> s;
+                if (!path.empty() && !(s = control::loadSampleFile(path, error))) warnings.push_back("sample " + path + ": " + error);
+                m_engine.setOscillatorSample(o, std::move(s));
+            } else {
+                std::shared_ptr<const dsp::Multisample> ms;
+                if (!path.empty() && !(ms = control::loadSfzFile(path, error, warnings))) warnings.push_back("instrument " + path + ": " + error);
+                m_engine.setOscillatorMultisample(o, std::move(ms));
+            }
+        }
+    }
+}
+
+Result Controller::loadOscillatorFile(int oscillator, const std::string& path)
+{
+    if (oscillator < 0 || oscillator >= modules::OscillatorModule::kCount) return Result::failure("no such oscillator");
+    auto* reg = m_config->findParamRegistry("Oscillator" + std::to_string(oscillator));
+    if (reg == nullptr) return Result::failure("no such oscillator");
+    namespace fs = std::filesystem;
+    std::string ext = fs::path(path).extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const auto type = static_cast<modules::OscType>(static_cast<int>(std::lround(reg->get<double>(modules::osc_keys::type))));
+    auto& loaded = m_assetPaths[static_cast<std::size_t>(oscillator)];
+    std::string error;
+    std::vector<std::string> warnings;
+
+    m_config->beginBatch();
+    Result result;
+    if (ext == ".sfz") {
+        if (auto ms = control::loadSfzFile(path, error, warnings)) {
+            const auto regions = ms->regions.size();
+            m_engine.setOscillatorMultisample(oscillator, std::move(ms));
+            reg->set<std::string>(modules::osc_keys::multisamplePath, path);
+            loaded[2] = path;
+            reg->set<double>(modules::osc_keys::type, static_cast<double>(modules::OscType::Multisample));
+            result = Result::success("Loaded " + std::to_string(regions) + " SFZ regions"
+                                     + (warnings.empty() ? std::string() : " (" + std::to_string(warnings.size()) + " warnings: " + warnings.front() + ")"));
+        } else {
+            result = Result::failure(error);
+        }
+    } else if (control::isWavetableFile(path) || (type == modules::OscType::Wavetable && ext != ".wav")) {
+        if (auto t = control::loadWavetableFile(path, error)) {
+            const int frames = t->frameCount();
+            m_engine.setOscillatorTable(oscillator, std::move(t));
+            reg->set<std::string>(modules::osc_keys::wavetablePath, path);
+            loaded[0] = path;
+            reg->set<double>(modules::osc_keys::type, static_cast<double>(modules::OscType::Wavetable));
+            result = Result::success("Loaded a " + std::to_string(frames) + "-frame wavetable");
+        } else {
+            result = Result::failure(error);
+        }
+    } else {
+        if (auto s = control::loadSampleFile(path, error)) {
+            const double seconds = static_cast<double>(s->frames()) / s->sampleRate();
+            m_engine.setOscillatorSample(oscillator, std::move(s));
+            reg->set<std::string>(modules::osc_keys::samplePath, path);
+            loaded[1] = path;
+            if (type == modules::OscType::Wavetable || type == modules::OscType::Multisample)
+                reg->set<double>(modules::osc_keys::type, static_cast<double>(modules::OscType::Sample));
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "Loaded a %.2f s sample", seconds);
+            result = Result::success(buf);
+        } else {
+            result = Result::failure(error);
+        }
+    }
+    m_config->endBatch();
+    return result;
 }
 
 Result Controller::loadPreset(std::span<const std::uint8_t> bytes)
@@ -300,8 +392,15 @@ Result Controller::loadPreset(std::span<const std::uint8_t> bytes)
     const presets::ImportReport report = serum2 ? importer.importSerum2(*serum2) : importer.importSerum1(serum1->programs.front());
     m_config->endBatch();
 
-    for (const auto& w : report.wavetables)
+    for (const auto& w : report.wavetables) {
         m_engine.setOscillatorTable(w.oscillator, dsp::WavetableBank::build(w.table.samples, w.table.frameSize, w.table.name));
+        // A wavetable found on disk is remembered (embedded ones only live in the engine until saved as files).
+        if (w.source.rfind("embedded", 0) != 0)
+            if (auto* reg = m_config->findParamRegistry("Oscillator" + std::to_string(w.oscillator))) {
+                reg->set<std::string>(modules::osc_keys::wavetablePath, w.source);
+                m_assetPaths[static_cast<std::size_t>(w.oscillator)][0] = w.source;
+            }
+    }
     m_history.clear();
     m_lastImport = report.toJson();
     std::string summary = report.summary();

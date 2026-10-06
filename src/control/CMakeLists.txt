@@ -3,6 +3,7 @@
 # control types, nothing below them.
 add_library(winerose_control STATIC
     src/Controller.cpp
+    src/AssetLoader.cpp
     src/EditHistory.cpp)
 add_library(winerose::control ALIAS winerose_control)
 

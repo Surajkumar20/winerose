@@ -15,7 +15,7 @@
 #include <vector>
 
 using namespace winerose;
-using winerose::test::midi;
+using winerose::test::midiEvent;
 using winerose::test::Rig;
 using dsp::FilterSettings;
 using dsp::FilterType;

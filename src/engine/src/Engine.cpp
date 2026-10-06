@@ -64,6 +64,7 @@ Engine::Engine(std::shared_ptr<ConfigManager> config)
         for (int s = 0; s < fx::kSlotsPerRack; ++s)
             m_fxSlots[static_cast<std::size_t>(r * fx::kSlotsPerRack + s)] = std::make_unique<modules::FxSlotModule>(m_config, r, s);
     m_mixer = std::make_unique<modules::MixerModule>(m_config);
+    m_midi = std::make_unique<modules::MidiModules>(m_config);
     m_config->addListener(this);
     syncFx();
 
@@ -73,6 +74,7 @@ Engine::Engine(std::shared_ptr<ConfigManager> config)
     m_subTable    = dsp::makeSubShapesTable();
     m_noiseTables = dsp::NoiseTables::make();
     m_lfoShapes   = makeLfoShapes();
+    m_spectralFft = std::make_unique<dsp::RealFft>(dsp::SpectralData::kFft);
     publishSnapshot();
 }
 
@@ -111,6 +113,7 @@ void Engine::prepare(double sampleRate, int maxBlockSize)
     m_masterGain.setRampSamples(voice::kControlBlock);
     m_masterGain.reset(m_masterVolume.load());
     m_voices.prepare(sampleRate);
+    m_notes.prepare(sampleRate);
     m_sampleClock = 0;
     m_pitchBendRaw = 0.0f;
     m_context = voice::ControlContext{};
@@ -130,7 +133,8 @@ void Engine::controlTick() noexcept
     bool warpWantsOversampling = false;
     for (int o = 0; o < voice::kOscCount; ++o) {
         const auto v = mods.osc[static_cast<std::size_t>(o)]->read(m_base.data());
-        if (v.enabled && (dsp::warpNeedsOversampling(v.warp1) || dsp::warpNeedsOversampling(v.warp2)))
+        if (v.enabled && v.type == modules::OscType::Wavetable
+            && (dsp::warpNeedsOversampling(v.warp1) || dsp::warpNeedsOversampling(v.warp2)))
             warpWantsOversampling = true;
     }
     // Quality: Good = 1x, High = 2x, Ultra = 4x, applied only while a warp needs it (Serum 1 behaviour:
@@ -160,6 +164,34 @@ void Engine::controlTick() noexcept
         m_rackActive[static_cast<std::size_t>(r)] = m_racks[static_cast<std::size_t>(r)].active();
     }
     m_mixLevels = m_mixer->read();
+
+    std::array<const midi::Clip*, midi::kClipSlots> clips {};
+    if (m_current != nullptr)
+        for (int c = 0; c < midi::kClipSlots; ++c) clips[static_cast<std::size_t>(c)] = m_current->clips[static_cast<std::size_t>(c)].get();
+    m_notes.setSettings(m_midi->read(), clips, m_noteSink, static_cast<std::int64_t>(m_sampleClock));
+}
+
+void Engine::NoteSink::noteOn(int note, int velocity) noexcept
+{
+    m_engine.m_voices.noteOn(note, velocity, m_engine.m_polyphonyLimit, m_engine.m_context);
+    if (m_engine.m_notes.generating()) m_engine.pushMidiOut(0x90, note, velocity);
+}
+
+void Engine::NoteSink::noteOff(int note) noexcept
+{
+    m_engine.m_voices.noteOff(note);
+    if (m_engine.m_notes.generating()) m_engine.pushMidiOut(0x80, note, 0);
+}
+
+void Engine::pushMidiOut(std::uint8_t status, int d1, int d2) noexcept
+{
+    if (m_midiOutCount >= static_cast<int>(m_midiOut.size())) return;
+    MidiEvent& e = m_midiOut[static_cast<std::size_t>(m_midiOutCount++)];
+    e.sampleOffset = m_blockPos;
+    e.data[0] = status;
+    e.data[1] = static_cast<std::uint8_t>(std::clamp(d1, 0, 127));
+    e.data[2] = static_cast<std::uint8_t>(std::clamp(d2, 0, 127));
+    e.size = 3;
 }
 
 void Engine::adoptSnapshot() noexcept
@@ -171,10 +203,16 @@ void Engine::adoptSnapshot() noexcept
     auto& ctx = m_context;
     ctx.slotDest = m_current != nullptr ? &m_current->slotDest : &m_noSlots;
     ctx.tables = voice::VoiceTables{};
+    ctx.tables.fft = m_spectralFft.get();
+    ctx.tables.roundRobin = m_roundRobin.data();
     if (m_current == nullptr) return;
     for (int o = 0; o < voice::kOscCount; ++o) {
-        ctx.tables.osc[static_cast<std::size_t>(o)]   = m_current->oscTables[static_cast<std::size_t>(o)].get();
-        ctx.tables.remap[static_cast<std::size_t>(o)] = m_current->remapCurves[static_cast<std::size_t>(o)].get();
+        const auto i = static_cast<std::size_t>(o);
+        ctx.tables.osc[i]      = m_current->oscTables[i].get();
+        ctx.tables.remap[i]    = m_current->remapCurves[i].get();
+        ctx.tables.sample[i]   = m_current->oscSamples[i].get();
+        ctx.tables.spectral[i] = m_current->oscSpectral[i].get();
+        ctx.tables.multi[i]    = m_current->oscMulti[i].get();
     }
     ctx.tables.sub       = m_current->subTable.get();
     ctx.tables.noise     = m_current->noiseTables.get();
@@ -202,17 +240,17 @@ void Engine::handleMidi(const MidiEvent& e) noexcept
     const int d2 = e.size > 2 ? e.data[2] : 0;
     switch (status) {
         case 0x90:
-            if (d2 > 0) m_voices.noteOn(d1, d2, m_polyphonyLimit, m_context);
-            else        m_voices.noteOff(d1);
+            if (d2 > 0) m_notes.noteOn(d1, d2, static_cast<std::int64_t>(m_sampleClock), m_noteSink);
+            else        m_notes.noteOff(d1, static_cast<std::int64_t>(m_sampleClock), m_noteSink);
             break;
         case 0x80:
-            m_voices.noteOff(d1);
+            m_notes.noteOff(d1, static_cast<std::int64_t>(m_sampleClock), m_noteSink);
             break;
         case 0xB0:
             if (d1 == 1)        m_context.global.modWheel = static_cast<float>(d2) / 127.0f;
             else if (d1 == 64)  m_voices.setSustainPedal(d2 >= 64);
             else if (d1 == 120) m_voices.allSoundOff();
-            else if (d1 == 123) m_voices.allNotesOff();
+            else if (d1 == 123) { m_notes.allNotesOff(static_cast<std::int64_t>(m_sampleClock), m_noteSink); m_voices.allNotesOff(); }
             break;
         case 0xD0:
             m_context.global.aftertouch = static_cast<float>(d1) / 127.0f;
@@ -236,6 +274,8 @@ void Engine::process(float* const* out, int numChannels, int numSamples,
     ScopedFlushDenormals ftz;
     adoptSnapshot();
     if (transport.bpm > 0.0) m_context.global.bpm = transport.bpm;
+    m_notes.setTransport(static_cast<std::int64_t>(m_sampleClock), transport);
+    m_midiOutCount = 0;
     const voice::VoiceTables& tables = m_context.tables;
 
     float peakL = 0.0f, peakR = 0.0f;
@@ -248,12 +288,17 @@ void Engine::process(float* const* out, int numChannels, int numSamples,
 
     while (pos < numSamples || ev < numEvents) {
         if (m_sampleClock % voice::kControlBlock == 0 && pos < numSamples) controlTick();
+        m_blockPos = std::min(pos, std::max(0, numSamples - 1));
         while (ev < numEvents && events[ev].sampleOffset <= pos) handleMidi(events[ev++]);
         if (pos >= numSamples) break;   // trailing events at/after the block end were handled above
+        m_notes.process(static_cast<std::int64_t>(m_sampleClock), m_noteSink);   // arp / clip events due now
 
         const int toBoundary = voice::kControlBlock - static_cast<int>(m_sampleClock % voice::kControlBlock);
         int end = std::min(numSamples, pos + toBoundary);
         if (ev < numEvents) end = std::min(end, std::max(pos + 1, events[ev].sampleOffset));
+        const std::int64_t next = m_notes.nextEvent(static_cast<std::int64_t>(m_sampleClock));
+        if (next != midi::NoteProcessor::kNever)
+            end = static_cast<int>(std::min<std::int64_t>(end, pos + std::max<std::int64_t>(1, next - static_cast<std::int64_t>(m_sampleClock))));
         const int n = end - pos;
 
         const std::size_t bytes = sizeof(float) * static_cast<std::size_t>(n);
@@ -293,9 +338,11 @@ void Engine::process(float* const* out, int numChannels, int numSamples,
     m_meters.peakRight.store(numChannels == 1 ? peakL : peakR, std::memory_order_relaxed);
 }
 
-void Engine::drainMidiOut(MidiEventSink& /*sink*/) noexcept
+void Engine::drainMidiOut(MidiEventSink& sink) noexcept
 {
-    // Arp / clip sequencer output lands here (SPEC §1.7, Phase 7).
+    // Arp / clip output generated by the last process() call (SPEC §1.7), in time order.
+    for (int i = 0; i < m_midiOutCount; ++i) sink.push(m_midiOut[static_cast<std::size_t>(i)]);
+    m_midiOutCount = 0;
 }
 
 void Engine::reset() noexcept
@@ -313,6 +360,21 @@ void Engine::setOscillatorTable(int index, std::shared_ptr<const dsp::WavetableB
     publishSnapshot();
 }
 
+void Engine::setOscillatorSample(int index, std::shared_ptr<const dsp::SampleData> sample)
+{
+    if (index < 0 || index >= voice::kOscCount) return;
+    m_oscSpectral[static_cast<std::size_t>(index)] = sample != nullptr ? dsp::SpectralData::analyze(*sample) : nullptr;
+    m_oscSamples[static_cast<std::size_t>(index)] = std::move(sample);
+    publishSnapshot();
+}
+
+void Engine::setOscillatorMultisample(int index, std::shared_ptr<const dsp::Multisample> instrument)
+{
+    if (index < 0 || index >= voice::kOscCount) return;
+    m_oscMulti[static_cast<std::size_t>(index)] = std::move(instrument);
+    publishSnapshot();
+}
+
 void Engine::publishSnapshot()
 {
     const auto& mods = *m_modules;
@@ -322,6 +384,22 @@ void Engine::publishSnapshot()
     snapshot->subTable    = m_subTable;
     snapshot->noiseTables = m_noiseTables;
     snapshot->lfoShapes   = m_lfoShapes;
+    snapshot->oscSamples  = m_oscSamples;
+    snapshot->oscSpectral = m_oscSpectral;
+    snapshot->oscMulti    = m_oscMulti;
+
+    // Clips: re-parsed only when their text or length changes.
+    for (int c = 0; c < midi::kClipSlots; ++c) {
+        const auto i = static_cast<std::size_t>(c);
+        const std::string text = m_midi->clipText(c);
+        const double length = m_midi->clipLength(c);
+        if (!m_clipObjects[i] || text != m_clipText[i] || length != m_clipLength[i]) {
+            m_clipText[i] = text;
+            m_clipLength[i] = length;
+            m_clipObjects[i] = std::make_shared<const midi::Clip>(midi::Clip::parse(text, length));
+        }
+    }
+    snapshot->clips = m_clipObjects;
 
     // Drawable curves → tables, rebuilt only when their text changes.
     for (int l = 0; l < modulation::kLfoCount; ++l) {

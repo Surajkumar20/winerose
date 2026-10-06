@@ -2,6 +2,8 @@
 # Depends on winerose_params only: it writes into registries, never into DSP (PLAN.md §1.1).
 add_library(winerose_presets STATIC
     src/PresetFormat.cpp
+    src/AudioFile.cpp
+    src/Sfz.cpp
     src/SerumPresetFile.cpp
     src/FxpFile.cpp
     src/WavetableWav.cpp

@@ -13,7 +13,7 @@
 
 namespace winerose::test {
 
-inline MidiEvent midi(int offset, std::uint8_t status, std::uint8_t d1, std::uint8_t d2)
+inline MidiEvent midiEvent(int offset, std::uint8_t status, std::uint8_t d1, std::uint8_t d2)
 {
     MidiEvent e;
     e.sampleOffset = offset;
@@ -49,7 +49,7 @@ struct Rig {
         std::vector<float> out;
         const int blocks = static_cast<int>(seconds * 48000.0 / 512.0);
         for (int b = 0; b < blocks; ++b) {
-            if (b == 0) block({midi(0, 0x90, static_cast<std::uint8_t>(note), 100)});
+            if (b == 0) block({midiEvent(0, 0x90, static_cast<std::uint8_t>(note), 100)});
             else        block();
             out.insert(out.end(), l.begin(), l.end());
         }

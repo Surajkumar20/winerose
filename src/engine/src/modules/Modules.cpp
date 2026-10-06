@@ -93,6 +93,41 @@ OscillatorModule::OscillatorModule(std::shared_ptr<ConfigManager> config, int in
                      "Remap 1/2 curve: \"x,y,curve;...\" from x=0 to x=1");
     registerRouting(r, index == 0 ? Route::Filter : Route::Main, "Routing");
 
+    const std::string gt = "Source", gs = "Sample", gg = "Granular", gp = "Spectral", gm = "Mapping";
+    const ParamOpts hz {NumericMeta::Curve::Exp, 1.0, "Hz"};
+    r.registerEnum (osc_keys::type, choices(kOscTypeNames), 0, gt,
+                    "What the oscillator plays (Sample/Granular/Spectral use the loaded sample; Multisample an SFZ)");
+    r.registerInt  (osc_keys::keyLo, 0, 0, 127, gm, "Lowest note this oscillator plays");
+    r.registerInt  (osc_keys::keyHi, 127, 0, 127, gm, "Highest note this oscillator plays");
+    r.registerInt  (osc_keys::velLo, 1, 1, 127, gm, "Lowest velocity this oscillator plays");
+    r.registerInt  (osc_keys::velHi, 127, 1, 127, gm, "Highest velocity this oscillator plays");
+    r.registerFloat(osc_keys::smpStart, 0.0f, 0.0f, 1.0f, gs, "Start position (set at note start)");
+    r.registerFloat(osc_keys::smpEnd, 1.0f, 0.0f, 1.0f, gs, "End position");
+    r.registerEnum (osc_keys::smpLoop, choices(dsp::SamplePlayer::kLoopNames), 0, gs, "Loop mode (default one-shot, as Serum's VST3)");
+    r.registerFloat(osc_keys::smpLoopStart, 0.0f, 0.0f, 1.0f, gs, "Loop start (modulatable)");
+    r.registerFloat(osc_keys::smpLoopEnd, 1.0f, 0.0f, 1.0f, gs, "Loop end (modulatable)");
+    r.registerFloat(osc_keys::smpXfade, 0.0f, 0.0f, 0.5f, gs, "Loop crossfade (fraction of the loop, equal power)");
+    r.registerBool (osc_keys::smpFileLoop, true, gs, "Use the file's own loop points when it has them");
+    r.registerFloat(osc_keys::grnPos, 0.0f, 0.0f, 1.0f, gg, "Grain position in the sample");
+    r.registerFloat(osc_keys::grnScan, 0.0f, -2.0f, 2.0f, gg, "Playhead speed (0 = frozen, 1 = real time)");
+    r.registerFloat(osc_keys::grnSize, 80.0f, 5.0f, 1000.0f, gg, "Grain length", ParamOpts{NumericMeta::Curve::Exp, 1.0, "ms"});
+    r.registerFloat(osc_keys::grnDensity, 20.0f, 1.0f, 500.0f, gg, "Grains per second", ParamOpts{NumericMeta::Curve::Exp, 1.0, "/s"});
+    r.registerFloat(osc_keys::grnPosRand, 0.0f, 0.0f, 1.0f, gg, "Position scatter");
+    r.registerFloat(osc_keys::grnPitchRand, 0.0f, 0.0f, 1.0f, gg, "Pitch scatter (100% = +/-12 st)");
+    r.registerFloat(osc_keys::grnPanRand, 0.0f, 0.0f, 1.0f, gg, "Pan scatter");
+    r.registerEnum (osc_keys::grnWindow, choices(dsp::granular::kWindowNames), 0, gg, "Grain window");
+    r.registerFloat(osc_keys::grnWindowAmt, 0.5f, 0.0f, 1.0f, gg, "Window amount (Tukey taper / Gaussian width)");
+    r.registerFloat(osc_keys::spcPos, 0.0f, 0.0f, 1.0f, gp, "Start position in the sample");
+    r.registerFloat(osc_keys::spcScan, 1.0f, -2.0f, 2.0f, gp, "Scan rate (0 = freeze, 1 = original speed)");
+    r.registerFloat(osc_keys::spcTimbre, 0.0f, -24.0f, 24.0f, gp, "Timbre shift (moves formants)", ParamOpts{.unit = "st"});
+    r.registerFloat(osc_keys::spcFormant, 0.0f, 0.0f, 1.0f, gp, "Formant preservation when pitched (100% = keep formants)");
+    r.registerFloat(osc_keys::spcLowCut, 20.0f, 20.0f, 20000.0f, gp, "Spectral filter low cut", hz);
+    r.registerFloat(osc_keys::spcHighCut, 20000.0f, 20.0f, 20000.0f, gp, "Spectral filter high cut", hz);
+    r.registerBool (osc_keys::spcTransients, true, gp, "Reset phases at transients (crisper attacks)");
+    r.registerString(osc_keys::wavetablePath, "", gt, "Wavetable file (empty: built-in or embedded)");
+    r.registerString(osc_keys::samplePath, "", gt, "Sample file for Sample / Granular / Spectral");
+    r.registerString(osc_keys::multisamplePath, "", gt, "SFZ instrument for Multisample");
+
     m_i.enabled = t.add(r, osc_keys::enabled);       m_i.level = t.add(r, osc_keys::level);
     m_i.pan = t.add(r, osc_keys::pan);               m_i.octave = t.add(r, osc_keys::octave);
     m_i.semi = t.add(r, osc_keys::semi);             m_i.fine = t.add(r, osc_keys::fine);
@@ -111,6 +146,22 @@ OscillatorModule::OscillatorModule(std::shared_ptr<ConfigManager> config, int in
     m_i.balance = t.add(r, route_keys::balance);
     m_i.bus1 = t.add(r, route_keys::bus1);
     m_i.bus2 = t.add(r, route_keys::bus2);
+    m_i.type = t.add(r, osc_keys::type);
+    m_i.keyLo = t.add(r, osc_keys::keyLo);           m_i.keyHi = t.add(r, osc_keys::keyHi);
+    m_i.velLo = t.add(r, osc_keys::velLo);           m_i.velHi = t.add(r, osc_keys::velHi);
+    m_i.smpStart = t.add(r, osc_keys::smpStart);     m_i.smpEnd = t.add(r, osc_keys::smpEnd);
+    m_i.smpLoop = t.add(r, osc_keys::smpLoop);       m_i.smpLoopStart = t.add(r, osc_keys::smpLoopStart);
+    m_i.smpLoopEnd = t.add(r, osc_keys::smpLoopEnd); m_i.smpXfade = t.add(r, osc_keys::smpXfade);
+    m_i.smpFileLoop = t.add(r, osc_keys::smpFileLoop);
+    m_i.grnPos = t.add(r, osc_keys::grnPos);         m_i.grnScan = t.add(r, osc_keys::grnScan);
+    m_i.grnSize = t.add(r, osc_keys::grnSize);       m_i.grnDensity = t.add(r, osc_keys::grnDensity);
+    m_i.grnPosRand = t.add(r, osc_keys::grnPosRand); m_i.grnPitchRand = t.add(r, osc_keys::grnPitchRand);
+    m_i.grnPanRand = t.add(r, osc_keys::grnPanRand); m_i.grnWindow = t.add(r, osc_keys::grnWindow);
+    m_i.grnWindowAmt = t.add(r, osc_keys::grnWindowAmt);
+    m_i.spcPos = t.add(r, osc_keys::spcPos);         m_i.spcScan = t.add(r, osc_keys::spcScan);
+    m_i.spcTimbre = t.add(r, osc_keys::spcTimbre);   m_i.spcFormant = t.add(r, osc_keys::spcFormant);
+    m_i.spcLowCut = t.add(r, osc_keys::spcLowCut);   m_i.spcHighCut = t.add(r, osc_keys::spcHighCut);
+    m_i.spcTransients = t.add(r, osc_keys::spcTransients);
 }
 
 OscillatorModule::Values OscillatorModule::read(const float* v) const noexcept
@@ -142,6 +193,34 @@ OscillatorModule::Values OscillatorModule::read(const float* v) const noexcept
     o.filterBalance = v[m_i.balance];
     o.bus1Send     = v[m_i.bus1];
     o.bus2Send     = v[m_i.bus2];
+    o.type         = asEnum(v[m_i.type], OscType::Count);
+    o.keyLo        = asInt(v[m_i.keyLo]);
+    o.keyHi        = asInt(v[m_i.keyHi]);
+    o.velLo        = asInt(v[m_i.velLo]);
+    o.velHi        = asInt(v[m_i.velHi]);
+    o.smpStart     = v[m_i.smpStart];
+    o.smpEnd       = v[m_i.smpEnd];
+    o.smpLoop      = asEnum(v[m_i.smpLoop], dsp::SamplePlayer::Loop::Count);
+    o.smpLoopStart = v[m_i.smpLoopStart];
+    o.smpLoopEnd   = v[m_i.smpLoopEnd];
+    o.smpXfade     = v[m_i.smpXfade];
+    o.smpFileLoop  = asBool(v[m_i.smpFileLoop]);
+    o.grnPos       = v[m_i.grnPos];
+    o.grnScan      = v[m_i.grnScan];
+    o.grnSize      = v[m_i.grnSize];
+    o.grnDensity   = v[m_i.grnDensity];
+    o.grnPosRand   = v[m_i.grnPosRand];
+    o.grnPitchRand = v[m_i.grnPitchRand];
+    o.grnPanRand   = v[m_i.grnPanRand];
+    o.grnWindow    = asEnum(v[m_i.grnWindow], dsp::granular::Window::Count);
+    o.grnWindowAmt = v[m_i.grnWindowAmt];
+    o.spcPos       = v[m_i.spcPos];
+    o.spcScan      = v[m_i.spcScan];
+    o.spcTimbre    = v[m_i.spcTimbre];
+    o.spcFormant   = v[m_i.spcFormant];
+    o.spcLowCut    = v[m_i.spcLowCut];
+    o.spcHighCut   = v[m_i.spcHighCut];
+    o.spcTransients = asBool(v[m_i.spcTransients]);
     return o;
 }
 

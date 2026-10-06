@@ -13,7 +13,7 @@
 #include <vector>
 
 using namespace winerose;
-using winerose::test::midi;
+using winerose::test::midiEvent;
 using winerose::test::Rig;
 using Catch::Approx;
 
@@ -60,7 +60,7 @@ TEST_CASE("oscillators B and C sound when enabled on their own", "[engine][phase
         rig.reg("Oscillator0").set("enabled", false);
         rig.reg(osc).set("enabled", true);
         INFO(osc);
-        CHECK(rig.block({midi(0, 0x90, 60, 100)}) > 0.1f);
+        CHECK(rig.block({midiEvent(0, 0x90, 60, 100)}) > 0.1f);
     }
 }
 
@@ -99,7 +99,7 @@ TEST_CASE("unison keeps the level roughly constant and widens the stereo image",
         osc.set("uniWidth", width);
         double mid = 0.0, side = 0.0, total = 0.0;
         for (int b = 0; b < 40; ++b) {
-            if (b == 0) rig.block({midi(0, 0x90, 48, 100)});
+            if (b == 0) rig.block({midiEvent(0, 0x90, 48, 100)});
             else        rig.block();
             if (b < 4) continue;
             for (std::size_t i = 0; i < 512; ++i) {
@@ -127,7 +127,7 @@ TEST_CASE("start phase sets the first sample", "[engine][phase2]")
     osc.set("random", 0.0f);
     osc.set("phase", 0.25f);
     rig.reg("Env0").set("attack", 0.0f);
-    rig.block({midi(0, 0x90, 69, 100)});
+    rig.block({midiEvent(0, 0x90, 69, 100)});
     CHECK(rig.l[0] == Approx(0.75f * 0.75f).margin(1e-3));   // sin(90°) · level · master
 }
 
@@ -141,9 +141,9 @@ TEST_CASE("Mem phase continues from the voice's previous note", "[engine][phase2
     osc.set("phase", 1.0f);                  // 100% = Mem
     rig.reg("Env0").set("attack", 0.0f);
     rig.reg("Env0").set("release", 0.0f);
-    rig.block({midi(0, 0x90, 69, 100), midi(100, 0x80, 69, 0)});
+    rig.block({midiEvent(0, 0x90, 69, 100), midiEvent(100, 0x80, 69, 0)});
     const float beforeRetrigger = rig.l[99];
-    rig.block({midi(0, 0x90, 69, 100)});
+    rig.block({midiEvent(0, 0x90, 69, 100)});
     // A reset phase would start at sin(0)=0; Mem continues near where the last note stopped.
     CHECK(std::abs(rig.l[0]) > 0.05f);
     CHECK(std::abs(beforeRetrigger) > 0.0f);

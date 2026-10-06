@@ -5,6 +5,8 @@
 #include "engine/dsp/Curve.h"
 #include "engine/dsp/WavetableBank.h"
 #include "engine/fx/FxRack.h"
+#include "engine/midi/NoteProcessor.h"
+#include "engine/modules/MidiModules.h"
 #include "engine/modules/EngineModules.h"
 #include "engine/modules/FxModules.h"
 #include "engine/voice/VoiceManager.h"
@@ -46,6 +48,11 @@ struct EngineSnapshot {
     std::shared_ptr<const dsp::WavetableBank> lfoShapes;    // fixed LFO shapes (Sine..Square)
     std::array<std::shared_ptr<const dsp::WavetableBank>, modulation::kLfoCount> lfoPaths;   // drawable shapes
     std::array<std::int16_t, modulation::kSlotCount> slotDest {};   // mod-matrix destination → target index (-1 = none)
+    // Phase 7 sources per oscillator A/B/C
+    std::array<std::shared_ptr<const dsp::SampleData>, voice::kOscCount>   oscSamples;
+    std::array<std::shared_ptr<const dsp::SpectralData>, voice::kOscCount> oscSpectral;
+    std::array<std::shared_ptr<const dsp::Multisample>, voice::kOscCount>  oscMulti;
+    std::array<std::shared_ptr<const midi::Clip>, midi::kClipSlots>        clips;   // parsed MidiClip0..11
 };
 
 /**
@@ -92,6 +99,16 @@ public:
     /** Message thread: replace oscillator A/B/C's (index 0..2) wavetable; takes effect at the next block. */
     void setOscillatorTable(int index, std::shared_ptr<const dsp::WavetableBank> table);
 
+    /** Message thread: the sample oscillator A/B/C plays in Sample, Granular and Spectral modes (null clears).
+     *  Runs the spectral analysis here (up to SpectralData::kMaxSeconds), so it can take a moment. */
+    void setOscillatorSample(int index, std::shared_ptr<const dsp::SampleData> sample);
+
+    /** Message thread: the SFZ instrument oscillator A/B/C plays in Multisample mode (null clears). */
+    void setOscillatorMultisample(int index, std::shared_ptr<const dsp::Multisample> instrument);
+
+    const dsp::SampleData*  oscillatorSample(int index) const { return m_oscSamples[static_cast<std::size_t>(index)].get(); }
+    const dsp::Multisample* oscillatorMultisample(int index) const { return m_oscMulti[static_cast<std::size_t>(index)].get(); }
+
     const MeterState& meters() const noexcept { return m_meters; }
     int    maxBlockSize() const noexcept { return m_maxBlockSize; }
     double sampleRate() const noexcept { return m_sampleRate; }
@@ -100,7 +117,21 @@ public:
     const modules::EngineModules& modules() const noexcept { return *m_modules; }
     std::shared_ptr<ConfigManager> configManager() const { return m_config; }
 
+    /** Processor time (absolute samples) — for tests of the MIDI generators. */
+    std::uint64_t sampleClock() const noexcept { return m_sampleClock; }
+
 private:
+    // Routes NoteProcessor output to the voices, and generated notes to MIDI out.
+    class NoteSink final : public midi::NoteOutput {
+    public:
+        explicit NoteSink(Engine& e) : m_engine(e) {}
+        void noteOn(int note, int velocity) noexcept override;
+        void noteOff(int note) noexcept override;
+    private:
+        Engine& m_engine;
+    };
+    void pushMidiOut(std::uint8_t status, int d1, int d2) noexcept;
+
     void controlTick() noexcept;
     void handleMidi(const MidiEvent& e) noexcept;
     void syncFx();   // message thread: (re)build effects whose slot type changed
@@ -143,6 +174,22 @@ private:
     std::array<std::shared_ptr<const dsp::WavetableBank>, modulation::kLfoCount> m_lfoPaths;
     std::array<std::string, voice::kOscCount> m_remapText;
     std::array<std::shared_ptr<const dsp::CurveTable>, voice::kOscCount> m_remapCurves;
+    std::array<std::shared_ptr<const dsp::SampleData>, voice::kOscCount>   m_oscSamples;
+    std::array<std::shared_ptr<const dsp::SpectralData>, voice::kOscCount> m_oscSpectral;
+    std::array<std::shared_ptr<const dsp::Multisample>, voice::kOscCount>  m_oscMulti;
+    std::unique_ptr<dsp::RealFft>          m_spectralFft;   // shared by all voices (audio thread only)
+    std::array<std::uint32_t, voice::kOscCount> m_roundRobin {};
+
+    // MIDI generators (SPEC §1.7)
+    std::unique_ptr<modules::MidiModules> m_midi;
+    midi::NoteProcessor m_notes;
+    NoteSink m_noteSink { *this };
+    std::array<std::string, midi::kClipSlots> m_clipText;
+    std::array<double, midi::kClipSlots> m_clipLength {};
+    std::array<std::shared_ptr<const midi::Clip>, midi::kClipSlots> m_clipObjects;
+    std::array<MidiEvent, 1024> m_midiOut {};
+    int m_midiOutCount = 0;
+    int m_blockPos = 0;   // position inside the current process() block (MIDI-out timestamps)
 
     SnapshotExchange<EngineSnapshot> m_snapshots;
     std::uint64_t                    m_snapshotRevision = 0;

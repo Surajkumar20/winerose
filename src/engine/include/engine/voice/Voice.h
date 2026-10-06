@@ -15,6 +15,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 
 namespace winerose::voice {
 
@@ -79,6 +80,11 @@ class Voice {
 public:
     static void initDownsamplerCoefs() noexcept;   // call once, off the audio thread
 
+    Voice();
+    ~Voice();
+    Voice(Voice&&) noexcept;
+    Voice& operator=(Voice&&) noexcept;
+
     void prepare(double sampleRate) noexcept;
 
     void start(int note, int velocity, std::uint64_t order, const ControlContext& ctx, Rng& rng) noexcept;
@@ -125,6 +131,32 @@ private:
         dsp::WarpMode warp1 = dsp::WarpMode::Off, warp2 = dsp::WarpMode::Off;
         LinearSmoother wtPos, level;
         float last = 0.0f;             // previous output (mono, unit level) for FM/AM/RM of the paired osc
+
+        // Phase 7 (non-wavetable sources)
+        modules::OscType type = modules::OscType::Wavetable;
+        bool   mapped = true;          // note and velocity inside the oscillator's key/velocity ranges
+        float  genGainL = 1.0f, genGainR = 1.0f;
+        double genOffsetSemis = 0.0;   // pitch offset (octave/semi/fine/coarse + bend), excluding the note
+        float  prevL = 0.0f, prevR = 0.0f;   // last base-rate generator sample (interpolation when oversampling)
+        dsp::SamplePlayer::Loop smpLoop = dsp::SamplePlayer::Loop::Off;
+        float  smpStart = 0.0f, smpEnd = 1.0f, smpLoopStart = 0.0f, smpLoopEnd = 1.0f, smpXfade = 0.0f;
+        bool   smpFileLoop = true;
+        dsp::granular::Params grn {};
+        dsp::spectral::Params spc {};
+    };
+
+    // Per-voice generator state for Sample / Multisample / Granular / Spectral (heap: ~70 KB per voice).
+    struct Generator {
+        static constexpr int kLayers = 4;   // simultaneous SFZ regions (layers, release triggers)
+        std::array<dsp::SamplePlayer, kLayers> players {};
+        std::array<int, kLayers> region {};
+        int  playerCount = 0;
+        bool started = false;
+        modules::OscType startedType = modules::OscType::Wavetable;
+        std::uint64_t assetId = 0;          // the asset the generator was started on
+        dsp::granular::Engine granular;
+        dsp::spectral::Voice  spectral;
+        std::array<float, kControlBlock> left {}, right {};
     };
 
     struct FastSlot {
@@ -139,9 +171,15 @@ private:
     void layout(const VoiceControl& control) noexcept;
     void resetDownsamplers() noexcept;
     void configureModSources(const ControlContext& ctx) noexcept;
+    void startGenerator(int o, const VoiceTables& tables) noexcept;
+    void startReleaseRegions(int o, const VoiceTables& tables) noexcept;
+    bool renderGenerator(int o, int numSamples, const VoiceTables& tables) noexcept;
     float sourceAtTick(modulation::Source s) const noexcept;
 
     std::array<Osc, kOscCount> m_osc {};
+    std::unique_ptr<std::array<Generator, kOscCount>> m_gen;
+    bool m_releasePending = false;   // start SFZ trigger=release regions at the next render
+    int  m_velocityRaw = 0;
 
     // Sub (computed when audible or when a warp uses it as an FM source)
     bool   m_subOn = false;

@@ -17,7 +17,7 @@
 #include <vector>
 
 using namespace winerose;
-using winerose::test::midi;
+using winerose::test::midiEvent;
 using winerose::test::Rig;
 using modulation::LfoMode;
 using modulation::LfoSettings;
@@ -253,14 +253,14 @@ TEST_CASE("a fixed source adds to the destination in normalized units", "[mod][m
     Rig rig;
     sineVoice(rig);
     rig.reg("Oscillator0").set("level", 0.4f);
-    rig.block({midi(0, 0x90, 69, 100)});
+    rig.block({midiEvent(0, 0x90, 69, 100)});
     const float base = peakOver(rig, 4);
 
     Rig mod;
     sineVoice(mod);
     mod.reg("Oscillator0").set("level", 0.4f);
     route(mod, 0, Source::Fixed, "Oscillator0.level", 0.4f);   // 0.4 + 0.4 = 0.8
-    mod.block({midi(0, 0x90, 69, 100)});
+    mod.block({midiEvent(0, 0x90, 69, 100)});
     CHECK(peakOver(mod, 4) / base == Approx(2.0f).margin(0.01f));
 }
 
@@ -273,7 +273,7 @@ TEST_CASE("slot switches: bypass, output scale, bipolar, aux", "[mod][matrix]")
         route(rig, 0, Source::Fixed, "Oscillator0.level", 0.4f);
         configure(rig.reg("ModSlot0"));
         rig.engine.publishSnapshot();
-        rig.block({midi(0, 0x90, 69, 100)});
+        rig.block({midiEvent(0, 0x90, 69, 100)});
         return peakOver(rig, 4) / (0.4f * 0.75f);   // relative to the unmodulated level
     };
     CHECK(ratio([](ParamRegistry& s) { s.set("bypass", true); }) == Approx(1.0f).margin(0.01f));
@@ -296,7 +296,7 @@ TEST_CASE("unknown or non-modulatable destinations are ignored", "[mod][matrix]"
         Rig rig;
         sineVoice(rig);
         route(rig, 0, Source::Fixed, dest, 1.0f);
-        rig.block({midi(0, 0x90, 69, 100)});
+        rig.block({midiEvent(0, 0x90, 69, 100)});
         INFO(dest);
         CHECK(peakOver(rig, 4) == Approx(0.5625f).margin(0.01f));
     }
@@ -309,7 +309,7 @@ TEST_CASE("velocity modulates per voice", "[mod][matrix]")
         sineVoice(rig);
         rig.reg("Oscillator0").set("level", 0.0f);
         route(rig, 0, Source::Velocity, "Oscillator0.level", 1.0f);
-        rig.block({midi(0, 0x90, 69, static_cast<std::uint8_t>(velocity))});
+        rig.block({midiEvent(0, 0x90, 69, static_cast<std::uint8_t>(velocity))});
         return peakOver(rig, 4);
     };
     CHECK(peakFor(127) == Approx(0.75f).margin(0.01f));
@@ -323,7 +323,7 @@ TEST_CASE("macros are sources and destinations", "[mod][matrix][macro]")
     rig.reg("Oscillator0").set("level", 0.0f);
     route(rig, 0, Source::Macro1, "Oscillator0.level", 1.0f);
     route(rig, 1, Source::Fixed, "Macro0.value", 0.5f);   // Macro 1 = knob 0 + 0.5
-    rig.block({midi(0, 0x90, 69, 100)});
+    rig.block({midiEvent(0, 0x90, 69, 100)});
     CHECK(peakOver(rig, 4) == Approx(0.5f * 0.75f).margin(0.01f));
 
     rig.reg("Macro0").set("value", 0.25f);   // knob + modulation = 0.75
@@ -337,9 +337,9 @@ TEST_CASE("mod wheel and aftertouch are global sources", "[mod][matrix]")
     sineVoice(rig);
     rig.reg("Oscillator0").set("level", 0.0f);
     route(rig, 0, Source::ModWheel, "Oscillator0.level", 1.0f);
-    rig.block({midi(0, 0x90, 69, 100)});
+    rig.block({midiEvent(0, 0x90, 69, 100)});
     CHECK(peakOver(rig, 2) == Approx(0.0f).margin(1e-4));
-    rig.block({midi(0, 0xB0, 1, 127)});
+    rig.block({midiEvent(0, 0xB0, 1, 127)});
     CHECK(peakOver(rig, 2) == Approx(0.75f).margin(0.01f));
 }
 
@@ -351,7 +351,7 @@ TEST_CASE("Env2 drives a destination over time", "[mod][matrix][env]")
     auto& env = rig.reg("Env1");
     env.set("attack", 0.1f);   // 100 ms linear rise
     route(rig, 0, Source::Env2, "Oscillator0.level", 1.0f);
-    rig.block({midi(0, 0x90, 69, 100)});
+    rig.block({midiEvent(0, 0x90, 69, 100)});
     const float early = peakOver(rig, 1);    // 11-21 ms
     for (int b = 0; b < 8; ++b) rig.block(); // past the 100 ms attack
     const float later = peakOver(rig, 2);
@@ -417,7 +417,7 @@ TEST_CASE("pitch bend moves every oscillator by the bend range", "[mod][engine]"
 {
     Rig rig;
     sineVoice(rig);
-    rig.block({midi(0, 0xE0, 0x7F, 0x7F), midi(1, 0x90, 69, 100)});   // full bend up before the note
+    rig.block({midiEvent(0, 0xE0, 0x7F, 0x7F), midiEvent(1, 0x90, 69, 100)});   // full bend up before the note
     std::vector<float> x;
     for (int b = 0; b < 94; ++b) { rig.block(); x.insert(x.end(), rig.l.begin(), rig.l.end()); }
     int crossings = 0;
@@ -434,7 +434,7 @@ TEST_CASE("envelope curve parameters reshape the decay", "[mod][env]")
         env.set("decay", 0.2f);
         env.set("sustain", 0.0f);
         env.set("decayCurve", curve);
-        rig.block({midi(0, 0x90, 69, 100)});
+        rig.block({midiEvent(0, 0x90, 69, 100)});
         for (int b = 0; b < 8; ++b) rig.block();   // ~96 ms ≈ halfway
         return peakOver(rig, 1);
     };
@@ -468,7 +468,7 @@ TEST_CASE("the LFO path string defines the Path shape", "[mod][lfo]")
         rig.reg("Oscillator0").set("level", 0.0f);
         rig.reg("LFO0").set<std::string>("path", path);
         route(rig, 0, Source::Lfo1, "Oscillator0.level", 1.0f);
-        rig.block({midi(0, 0x90, 69, 100)});
+        rig.block({midiEvent(0, 0x90, 69, 100)});
         return peakOver(rig, 2);
     };
     CHECK(peakFor("0,0,0;1,0,0") == Approx(0.0f).margin(0.01f));    // flat zero

@@ -5,6 +5,7 @@
 
 #include "params/ParamListener.h"
 
+#include <array>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -55,6 +56,7 @@ public:
     Result      loadState(const std::string& state) override;
     Result      loadPreset(std::span<const std::uint8_t> bytes) override;
     std::string importReport() const override { return m_lastImport; }
+    Result      loadOscillatorFile(int oscillator, const std::string& path) override;
     bool        undo() override;
     bool        redo() override;
     bool        canUndo() const override { return m_history.canUndo(); }
@@ -80,6 +82,9 @@ private:
     std::shared_ptr<Subscribers>   m_subscribers;   // shared so a Subscription outliving us is harmless
     std::vector<std::filesystem::path> m_assetRoots;
     std::string                    m_lastImport = "{}";
+    // Asset paths currently loaded per oscillator: [wavetable, sample, multisample].
+    std::array<std::array<std::string, 3>, 3> m_assetPaths;
+    void reloadAssets(std::vector<std::string>& warnings);
 };
 
 } // namespace winerose::control

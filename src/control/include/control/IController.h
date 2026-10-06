@@ -82,6 +82,10 @@ public:
     virtual Result      loadPreset(std::span<const std::uint8_t> bytes) = 0;
     /** JSON report of the last Serum import (mapped / unmapped keys, wavetables, warnings); "{}" if none. */
     virtual std::string importReport() const = 0;
+    /** Load a file onto oscillator A/B/C (0..2): a wavetable .wav (clm chunk), any other .wav as a sample
+     *  (switching the oscillator to Sample mode if it was Wavetable/Multisample), or an .sfz instrument
+     *  (switching it to Multisample). The path is stored in the patch and reloaded with it. */
+    virtual Result      loadOscillatorFile(int oscillator, const std::string& path) = 0;
 
     // --- Undo ---
     virtual bool undo() = 0;

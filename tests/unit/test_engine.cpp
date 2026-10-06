@@ -7,7 +7,7 @@
 #include <vector>
 
 using namespace winerose;
-using winerose::test::midi;
+using winerose::test::midiEvent;
 using winerose::test::Rig;
 using Catch::Approx;
 
@@ -46,11 +46,11 @@ TEST_CASE("silent without notes, for any block size", "[engine]")
 TEST_CASE("a note sounds, then decays to silence after its release", "[engine]")
 {
     Rig rig;
-    CHECK(rig.block({midi(0, 0x90, 60, 100)}) > 0.1f);
+    CHECK(rig.block({midiEvent(0, 0x90, 60, 100)}) > 0.1f);
     CHECK(rig.engine.activeVoiceCount() == 1);
     CHECK(rig.engine.meters().peakLeft.load() > 0.1f);
 
-    rig.block({midi(0, 0x80, 60, 0)});
+    rig.block({midiEvent(0, 0x80, 60, 0)});
     for (int i = 0; i < 10; ++i) rig.block();   // default release 15 ms ≪ 10 blocks
     CHECK(rig.block() == 0.0f);
     CHECK(rig.engine.activeVoiceCount() == 0);
@@ -59,8 +59,8 @@ TEST_CASE("a note sounds, then decays to silence after its release", "[engine]")
 TEST_CASE("note-on with velocity 0 is a note-off", "[engine]")
 {
     Rig rig;
-    rig.block({midi(0, 0x90, 60, 100)});
-    rig.block({midi(0, 0x90, 60, 0)});
+    rig.block({midiEvent(0, 0x90, 60, 100)});
+    rig.block({midiEvent(0, 0x90, 60, 0)});
     for (int i = 0; i < 10; ++i) rig.block();
     CHECK(rig.engine.activeVoiceCount() == 0);
 }
@@ -68,7 +68,7 @@ TEST_CASE("note-on with velocity 0 is a note-off", "[engine]")
 TEST_CASE("events land on their exact sample", "[engine]")
 {
     Rig rig;
-    rig.block({midi(300, 0x90, 69, 100)});
+    rig.block({midiEvent(300, 0x90, 69, 100)});
     for (std::size_t i = 0; i < 300; ++i) REQUIRE(rig.l[i] == 0.0f);
     float after = 0.0f;
     for (std::size_t i = 300; i < 512; ++i) after = std::max(after, std::abs(rig.l[i]));
@@ -80,7 +80,7 @@ TEST_CASE("polyphony limit steals the oldest voice", "[engine]")
     Rig rig;
     rig.reg("Global").set("polyphony", 4);
     std::vector<MidiEvent> notes;
-    for (int n = 0; n < 6; ++n) notes.push_back(midi(n * 10, 0x90, static_cast<std::uint8_t>(60 + n), 100));
+    for (int n = 0; n < 6; ++n) notes.push_back(midiEvent(n * 10, 0x90, static_cast<std::uint8_t>(60 + n), 100));
     rig.block(notes);
     CHECK(rig.engine.activeVoiceCount() == 4);
 }
@@ -88,10 +88,10 @@ TEST_CASE("polyphony limit steals the oldest voice", "[engine]")
 TEST_CASE("sustain pedal holds released notes until it lifts", "[engine]")
 {
     Rig rig;
-    rig.block({midi(0, 0xB0, 64, 127), midi(10, 0x90, 60, 100), midi(20, 0x80, 60, 0)});
+    rig.block({midiEvent(0, 0xB0, 64, 127), midiEvent(10, 0x90, 60, 100), midiEvent(20, 0x80, 60, 0)});
     for (int i = 0; i < 10; ++i) rig.block();
     CHECK(rig.engine.activeVoiceCount() == 1);
-    rig.block({midi(0, 0xB0, 64, 0)});
+    rig.block({midiEvent(0, 0xB0, 64, 0)});
     for (int i = 0; i < 10; ++i) rig.block();
     CHECK(rig.engine.activeVoiceCount() == 0);
 }
@@ -99,9 +99,9 @@ TEST_CASE("sustain pedal holds released notes until it lifts", "[engine]")
 TEST_CASE("all-sound-off silences immediately", "[engine]")
 {
     Rig rig;
-    rig.block({midi(0, 0x90, 60, 100), midi(0, 0x90, 64, 100)});
+    rig.block({midiEvent(0, 0x90, 60, 100), midiEvent(0, 0x90, 64, 100)});
     CHECK(rig.engine.activeVoiceCount() == 2);
-    rig.block({midi(0, 0xB0, 120, 0)});
+    rig.block({midiEvent(0, 0xB0, 120, 0)});
     CHECK(rig.engine.activeVoiceCount() == 0);
 }
 
@@ -112,7 +112,7 @@ TEST_CASE("the filter removes high-frequency energy when enabled", "[engine]")
         rig.reg("Oscillator0").set("random", 0.0f);
         rig.reg("Filter0").set("enabled", filterOn);
         rig.reg("Filter0").set("cutoff", 200.0f);
-        rig.block({midi(0, 0x90, 48, 100)});
+        rig.block({midiEvent(0, 0x90, 48, 100)});
         // First difference ≈ high-pass: its energy tracks the high-frequency content.
         double e = 0.0;
         for (int b = 0; b < 4; ++b) {
@@ -139,7 +139,7 @@ TEST_CASE("oscillator pitch follows octave/semi/fine", "[engine]")
         int crossings = 0;
         float prev = 0.0f;
         for (int b = 0; b < 94; ++b) {   // 94 · 512 ≈ 1.003 s
-            rig.block(b == 0 ? std::vector<MidiEvent>{midi(0, 0x90, 69, 100)} : std::vector<MidiEvent>{});
+            rig.block(b == 0 ? std::vector<MidiEvent>{midiEvent(0, 0x90, 69, 100)} : std::vector<MidiEvent>{});
             for (std::size_t i = 0; i < 512; ++i) {
                 if (prev <= 0.0f && rig.l[i] > 0.0f) ++crossings;
                 prev = rig.l[i];
@@ -158,7 +158,7 @@ TEST_CASE("published wavetables take effect at the next block", "[engine]")
     Rig rig;
     std::vector<float> silent(2048, 0.0f);
     rig.engine.setOscillatorTable(0, dsp::WavetableBank::build(silent, 2048, "silence"));
-    CHECK(rig.block({midi(0, 0x90, 60, 100)}) == 0.0f);
+    CHECK(rig.block({midiEvent(0, 0x90, 60, 100)}) == 0.0f);
     rig.engine.setOscillatorTable(0, dsp::makeBasicShapesTable());
     CHECK(rig.block() > 0.1f);
 }

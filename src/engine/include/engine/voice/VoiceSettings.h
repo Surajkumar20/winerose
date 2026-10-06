@@ -2,6 +2,10 @@
 
 #include "engine/dsp/Curve.h"
 #include "engine/dsp/Envelope.h"
+#include "engine/dsp/Fft.h"
+#include "engine/dsp/Multisample.h"
+#include "engine/dsp/SampleData.h"
+#include "engine/dsp/Spectral.h"
 #include "engine/dsp/NoiseTable.h"
 #include "engine/dsp/Svf.h"
 #include "engine/dsp/WavetableBank.h"
@@ -47,6 +51,13 @@ struct VoiceTables {
     const dsp::NoiseTables*   noise = nullptr;
     const dsp::WavetableBank* lfoShapes = nullptr;
     std::array<const dsp::WavetableBank*, modulation::kLfoCount> lfoPaths {};
+    // Phase 7 sources (oscillators A/B/C): the loaded sample (Sample / Granular), its spectral analysis
+    // (Spectral), and the SFZ instrument (Multisample).
+    std::array<const dsp::SampleData*, kOscCount>   sample {};
+    std::array<const dsp::SpectralData*, kOscCount> spectral {};
+    std::array<const dsp::Multisample*, kOscCount>  multi {};
+    dsp::RealFft*  fft = nullptr;          // shared spectral-resynthesis FFT (voices render one at a time)
+    std::uint32_t* roundRobin = nullptr;   // per-oscillator SFZ round-robin counters (kOscCount entries)
 
     modulation::LfoTables lfo(int index) const noexcept
     {

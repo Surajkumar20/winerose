@@ -598,3 +598,33 @@ Dependencies: zstd v1.5.7 (`libzstd_static`), zlib v1.3.2 (`ZLIB::ZLIBSTATIC`, c
 1. `preset_dump` on presets the user owns shows the real key names and value ranges (no Serum install needed).
 2. `measure_host` against a licensed, installed Serum 2 measures curves and enum orders (VERIFIED rows).
 Until then imports keep everything, map what the name guesses catch, and say so in the report.
+
+---
+
+## 10. As built on `feature/audio_engine`: Phase 7 (SPEC §5.4): done
+
+Built on top of Phase 6 (master = feature/presets was fast-forwarded first, so SFZ/WAV parsing lives in `presets`).
+
+**Oscillator types** (`Oscillator{0..2}.type`: Wavetable, Sample, Multisample, Granular, Spectral; Winerose order).
+Non-wavetable sources render their chunk at the base rate into a per-voice generator buffer (heap, started lazily
+at the first render because they need the snapshot's tables) and enter the normal routing; when a warp forces
+oversampling elsewhere they are linearly interpolated across sub-steps. Unison and warps apply to Wavetable only.
+Audio-rate (fast-path) LFO pitch modulation reaches wavetables only; generators take pitch per block.
+
+| Piece | Where | Notes |
+|---|---|---|
+| `SampleData` (immutable, 8 mip levels via a 63-tap Kaiser half-band, 8 guard samples) + `sinc` reads (16-tap Kaiser, 256 phases, 5 cutoffs a quarter-octave apart) | `dsp/SampleData` | Reads ≥ 1x pick the mip level and cutoff ≤ 1/ratio → no aliasing; ripple ≈ -75 dB. |
+| `SamplePlayer`: one-shot, forward (equal-power crossfade), ping-pong, sustain loops | `dsp/SampleData` | Sample osc: start/end, modulatable loop points, file `smpl` loops (`smpFileLoop`). |
+| `Multisample` + SFZ → regions | `dsp/Multisample`, `presets/Sfz`, `control/AssetLoader` | lokey/hikey/key, lovel/hivel, pitch_keycenter/keytrack, tune/transpose, volume, pan, offset/end, loop_mode/start/end/crossfade, amp_velcurve_N, seq_length/position, trigger=release; `<control> default_path`, `#define`, comments, note names (c4 = 60), spaces in paths. Up to 4 layers per oscillator. |
+| Granular: fixed 256-grain pool per voice, async scheduler, 5 windows | `dsp/Granular` | Cost bounded: 10x the requested grains costs the same as a saturated pool (13% of a core per saturated voice). |
+| Spectral: STFT 2048/512, true-envelope (pitch-adaptive cepstral order), instantaneous frequency, transient flags; resynthesis draws each partial's window transform at its exact target frequency with centre-phase tracking | `dsp/Spectral` | Formant drift at ±12 st: 0.94% / 0.93% (limit 1%; thin margin). `spcFormant` 0 = plain shift (default), 1 = formants kept; `spcTimbre` moves formants. ~0.5% CPU per voice. |
+| Key/velocity mapping per oscillator (`keyLo/keyHi/velLo/velHi`) | `modules/Modules`, `voice/Voice` | |
+| Key/scale (`PitchQuantizer0`), Arp (`Arp0`), Clip (`ClipPlayer`, `MidiClip0..11`) | `midi/NoteProcessor`, `modules/MidiModules` | Sample-accurate on the absolute clock (host ppq while playing, internal clock otherwise); the engine splits chunks at generated events → identical output for any block size (tested 512 vs 97). Arp: 7 modes, 12 synced rates, octaves, gate, swing, chance, velocity modes, latch, transpose. Clip: note-triggered (transposed from C4) or host-synced loops. Generated notes go to `drainMidiOut`. |
+| Asset files in the patch (`wavetablePath`, `samplePath`, `multisamplePath`) reloaded on `loadState`; `IController::loadOscillatorFile` | `control/Controller` | Serum imports record wavetable files they resolved. |
+
+**Known limits.** SFZ `trigger=release` and `one_shot` regions still sit under the voice's amp envelope (they fade
+with its release). No sample slicing, tape-stop rate or scan-BPM controls yet. Embedded (imported) wavetables are
+not saved in the patch. Clip editing UI arrives with feature/UI (clips are text parameters today).
+
+**CPU.** The acceptance scenario costs +0.3 points over Phase 6 (A/B on the same machine: 23.5% → 23.8%). This
+machine currently measures ~2 points slower than earlier runs, so the 25% budget is tight; it still passes.

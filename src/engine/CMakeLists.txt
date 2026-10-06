@@ -7,11 +7,17 @@ add_library(winerose_engine STATIC
     src/dsp/WavetableRead4.cpp
     src/dsp/NoiseTable.cpp
     src/dsp/Curve.cpp
+    src/dsp/SampleData.cpp
+    src/dsp/Granular.cpp
+    src/dsp/Spectral.cpp
     src/dsp/filters/FilterUnit.cpp
     src/modulation/ModTargets.cpp
     src/modulation/Lfo.cpp
     src/modules/EngineModules.cpp
     src/modules/FxModules.cpp
+    src/modules/MidiModules.cpp
+    src/midi/Midi.cpp
+    src/midi/NoteProcessor.cpp
     src/fx/EffectRegistry.cpp
     src/fx/EffectsBasic.cpp
     src/fx/EffectsTime.cpp

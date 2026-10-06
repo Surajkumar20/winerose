@@ -6,6 +6,9 @@
 #include "engine/dsp/Warp.h"
 #include "engine/fx/Effect.h"
 #include "engine/dsp/WavetableBank.h"
+#include "engine/dsp/SampleData.h"
+
+#include <cmath>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -139,4 +142,67 @@ TEST_CASE("micro: wavetable read cost", "[benchmark][micro]")
         const double ns = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count() / kReads;
         std::printf("%-30s blend=%.2f  %5.2f ns/read  (sink %g)\n", c.name, lc.blend, ns, sink);
     }
+}
+
+// Phase 7 acceptance: "granular CPU bounded". With the densest settings every voice saturates its fixed
+// 256-grain pool, so the per-voice cost has a hard ceiling independent of size/density. Spectral voices
+// are reported alongside (one inverse FFT per 512-sample hop).
+namespace {
+double measureSourceLoad(modules::OscType type, int voices, float sizeMs, float density, double seconds)
+{
+    constexpr double kRate = 48000.0;
+    constexpr int kBlock = 128;
+    auto cm = std::make_shared<ConfigManager>();
+    Engine engine(cm);
+    std::vector<float> src(96000);
+    for (std::size_t i = 0; i < src.size(); ++i) src[i] = 0.5f * static_cast<float>(std::sin(0.0288 * static_cast<double>(i)));
+    engine.setOscillatorSample(0, dsp::SampleData::build(src, src, kRate, 60));
+    auto& osc = *cm->findParamRegistry("Oscillator0");
+    osc.set("type", static_cast<int>(type));
+    osc.set("grnSize", sizeMs);
+    osc.set("grnDensity", density);
+    osc.set("grnPosRand", 1.0f);
+    osc.set("grnPitchRand", 0.5f);
+    cm->findParamRegistry("Filter0")->set("enabled", false);
+    cm->findParamRegistry("Env0")->set("sustain", 1.0f);
+    cm->findParamRegistry("Global")->set("polyphony", voices);
+    engine.prepare(kRate, kBlock);
+    std::vector<float> l(kBlock), r(kBlock);
+    float* chans[] = {l.data(), r.data()};
+    std::vector<MidiEvent> chord;
+    for (int n = 0; n < voices; ++n) chord.push_back(noteOn(48 + n * 2));
+    engine.process(chans, 2, kBlock, chord.data(), static_cast<int>(chord.size()), TransportInfo{});
+    // Let the grain pools fill before timing.
+    for (int b = 0; b < static_cast<int>(1.2 * kRate / kBlock); ++b) engine.process(chans, 2, kBlock, nullptr, 0, TransportInfo{});
+    const int blocks = static_cast<int>(seconds * kRate / kBlock);
+    const auto start = std::chrono::steady_clock::now();
+    for (int b = 0; b < blocks; ++b) engine.process(chans, 2, kBlock, nullptr, 0, TransportInfo{});
+    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    return elapsed / (blocks * kBlock / kRate);
+}
+}
+
+TEST_CASE("Phase 7: granular cost is bounded by the grain pool", "[benchmark]")
+{
+#ifdef NDEBUG
+    constexpr double kSeconds = 2.0;
+#else
+    constexpr double kSeconds = 0.25;
+#endif
+    const double typical = measureSourceLoad(modules::OscType::Granular, 1, 80.0f, 20.0f, kSeconds);
+    const double dense = measureSourceLoad(modules::OscType::Granular, 1, 1000.0f, 500.0f, kSeconds);   // pool saturated
+    const double denser = measureSourceLoad(modules::OscType::Granular, 1, 1000.0f, 5000.0f, kSeconds); // even more requested
+    const double dense4 = measureSourceLoad(modules::OscType::Granular, 4, 1000.0f, 500.0f, kSeconds);
+    const double spectral = measureSourceLoad(modules::OscType::Spectral, 1, 80.0f, 20.0f, kSeconds);
+    const double spectral8 = measureSourceLoad(modules::OscType::Spectral, 8, 80.0f, 20.0f, kSeconds);
+    std::printf("granular, 1 voice, 80 ms x 20/s          %6.1f %% of one core\n", typical * 100.0);
+    std::printf("granular, 1 voice, pool saturated (256)  %6.1f %% of one core\n", dense * 100.0);
+    std::printf("granular, 1 voice, 10x more requested    %6.1f %% of one core\n", denser * 100.0);
+    std::printf("granular, 4 voices, pool saturated       %6.1f %% of one core\n", dense4 * 100.0);
+    std::printf("spectral, 1 voice                        %6.1f %% of one core\n", spectral * 100.0);
+    std::printf("spectral, 8 voices                       %6.1f %% of one core\n", spectral8 * 100.0);
+#ifdef NDEBUG
+    // Bounded: asking for 10x the grains costs no more than a saturated pool (plus measurement noise).
+    CHECK(denser < dense * 1.25 + 0.005);
+#endif
 }

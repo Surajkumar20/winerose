@@ -2,6 +2,8 @@
 
 #include "engine/dsp/Curve.h"
 #include "engine/dsp/Envelope.h"
+#include "engine/dsp/Granular.h"
+#include "engine/dsp/SampleData.h"
 #include "engine/dsp/NoiseTable.h"
 #include "engine/dsp/Unison.h"
 #include "engine/dsp/Warp.h"
@@ -42,6 +44,10 @@ inline constexpr const char* kFilterOutputNames[] = {"Main", "Direct"};
 enum class FilterRouting : int { Serial = 0, Parallel, Count };
 inline constexpr const char* kFilterRoutingNames[] = {"Serial", "Parallel"};
 
+// What an oscillator plays (SPEC §1.4). Winerose order; append only.
+enum class OscType : int { Wavetable = 0, Sample, Multisample, Granular, Spectral, Count };
+inline constexpr const char* kOscTypeNames[] = {"Wavetable", "Sample", "Multisample", "Granular", "Spectral"};
+
 namespace route_keys {
 inline constexpr const char* route   = "route";
 inline constexpr const char* balance = "filterBalance";
@@ -77,6 +83,39 @@ inline constexpr const char* warp1Amount  = "warp1Amount";
 inline constexpr const char* warp2Mode    = "warp2Mode";
 inline constexpr const char* warp2Amount  = "warp2Amount";
 inline constexpr const char* remapCurve   = "remapCurve";   // string: drawable curve for Remap 1/2
+// Phase 7: oscillator type, key/velocity mapping, and the per-type controls.
+inline constexpr const char* type         = "type";
+inline constexpr const char* keyLo        = "keyLo";
+inline constexpr const char* keyHi        = "keyHi";
+inline constexpr const char* velLo        = "velLo";
+inline constexpr const char* velHi        = "velHi";
+inline constexpr const char* smpStart     = "smpStart";
+inline constexpr const char* smpEnd       = "smpEnd";
+inline constexpr const char* smpLoop      = "smpLoop";
+inline constexpr const char* smpLoopStart = "smpLoopStart";
+inline constexpr const char* smpLoopEnd   = "smpLoopEnd";
+inline constexpr const char* smpXfade     = "smpXfade";
+inline constexpr const char* smpFileLoop  = "smpFileLoop";
+inline constexpr const char* grnPos       = "grnPos";
+inline constexpr const char* grnScan      = "grnScan";
+inline constexpr const char* grnSize      = "grnSize";
+inline constexpr const char* grnDensity   = "grnDensity";
+inline constexpr const char* grnPosRand   = "grnPosRand";
+inline constexpr const char* grnPitchRand = "grnPitchRand";
+inline constexpr const char* grnPanRand   = "grnPanRand";
+inline constexpr const char* grnWindow    = "grnWindow";
+inline constexpr const char* grnWindowAmt = "grnWindowAmt";
+inline constexpr const char* spcPos       = "spcPos";
+inline constexpr const char* spcScan      = "spcScan";
+inline constexpr const char* spcTimbre    = "spcTimbre";
+inline constexpr const char* spcFormant   = "spcFormant";
+inline constexpr const char* spcLowCut    = "spcLowCut";
+inline constexpr const char* spcHighCut   = "spcHighCut";
+inline constexpr const char* spcTransients = "spcTransients";
+// Asset files (strings; the control layer loads them, and reloads them when a state is restored).
+inline constexpr const char* wavetablePath   = "wavetablePath";
+inline constexpr const char* samplePath      = "samplePath";
+inline constexpr const char* multisamplePath = "multisamplePath";
 }
 
 class OscillatorModule {
@@ -109,6 +148,22 @@ public:
         Route route;
         float filterBalance;  // 0 = Filter 1, 1 = Filter 2
         float bus1Send, bus2Send;
+
+        OscType type;
+        int   keyLo, keyHi, velLo, velHi;   // the oscillator only sounds for notes inside both ranges
+        // Sample
+        float smpStart, smpEnd;             // 0..1 of the sample
+        dsp::SamplePlayer::Loop smpLoop;
+        float smpLoopStart, smpLoopEnd;     // 0..1 of the sample (used unless smpFileLoop and the file has a loop)
+        float smpXfade;                     // 0..0.5 of the loop length
+        bool  smpFileLoop;
+        // Granular
+        float grnPos, grnScan, grnSize, grnDensity, grnPosRand, grnPitchRand, grnPanRand;
+        dsp::granular::Window grnWindow;
+        float grnWindowAmt;
+        // Spectral
+        float spcPos, spcScan, spcTimbre, spcFormant, spcLowCut, spcHighCut;
+        bool  spcTransients;
     };
     static constexpr float kPhaseMem = 0.999f;
 
@@ -116,6 +171,9 @@ public:
         int enabled, level, pan, octave, semi, fine, coarse, wtPos, wtSmooth, phase, random, unison, uniDetune,
             uniBlend, uniWidth, uniRange, uniStack, uniMode, uniSpan, uniRandStart, uniWarp, warp1Mode,
             warp1Amount, warp2Mode, warp2Amount, route, balance, bus1, bus2;
+        int type, keyLo, keyHi, velLo, velHi, smpStart, smpEnd, smpLoop, smpLoopStart, smpLoopEnd, smpXfade,
+            smpFileLoop, grnPos, grnScan, grnSize, grnDensity, grnPosRand, grnPitchRand, grnPanRand, grnWindow,
+            grnWindowAmt, spcPos, spcScan, spcTimbre, spcFormant, spcLowCut, spcHighCut, spcTransients;
     };
 
     OscillatorModule(std::shared_ptr<ConfigManager> config, int index, ModTargets& targets);

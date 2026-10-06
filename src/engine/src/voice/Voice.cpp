@@ -48,8 +48,16 @@ float shapeSource(float x, float curve, bool bipolar) noexcept
 
 } // namespace
 
+Voice::Voice() : m_gen(std::make_unique<std::array<Generator, kOscCount>>()) {}
+Voice::~Voice() = default;
+Voice::Voice(Voice&&) noexcept = default;
+Voice& Voice::operator=(Voice&&) noexcept = default;
+
 void Voice::initDownsamplerCoefs() noexcept
 {
+    dsp::sinc::init();
+    dsp::granular::init();
+    dsp::spectral::init();
     // 12 coefficients, transition band 0.04 of the half-band: > 100 dB stopband (HIIR designer).
     hiir::PolyphaseIir2Designer::compute_coefs_spec_order_tbw(g_downCoefs, kDownsamplerCoefs, 0.04);
 }
@@ -82,6 +90,9 @@ void Voice::release() noexcept
 {
     for (auto& e : m_env) e.noteOff();
     m_released = true;
+    for (auto& g : *m_gen)
+        for (int p = 0; p < g.playerCount; ++p) g.players[static_cast<std::size_t>(p)].released = true;
+    m_releasePending = true;
 }
 
 void Voice::kill() noexcept
@@ -256,7 +267,10 @@ void Voice::start(int note, int velocity, std::uint64_t order, const ControlCont
     m_random1 = static_cast<float>(rng.next());
     m_random2 = static_cast<float>(rng.next());
     m_velocity = static_cast<float>(std::clamp(velocity, 0, 127)) / 127.0f;
+    m_velocityRaw = std::clamp(velocity, 0, 127);
     m_noteNorm = static_cast<float>(std::clamp(note, 0, 127)) / 127.0f;
+    for (auto& g : *m_gen) g.started = false;   // generators start at the first render (they need the tables)
+    m_releasePending = false;
 
     // Mod sources start from their unmodulated settings so the first evaluation sees t = 0 values.
     for (int l = 0; l < modulation::kLfoCount; ++l) {
@@ -298,7 +312,10 @@ void Voice::steal(int note, int velocity, std::uint64_t order, const ControlCont
     m_released = false;
     m_sustained = false;
     m_velocity = static_cast<float>(std::clamp(velocity, 0, 127)) / 127.0f;
+    m_velocityRaw = std::clamp(velocity, 0, 127);
     m_noteNorm = static_cast<float>(std::clamp(note, 0, 127)) / 127.0f;
+    for (auto& g : *m_gen) g.started = false;   // a stolen voice restarts its sample sources for the new note
+    m_releasePending = false;
     evaluateModulation(ctx);
     configureModSources(ctx);
     layout(m_settings.control);
@@ -338,7 +355,42 @@ void Voice::layout(const VoiceControl& control) noexcept
         osc.span   = v.uniSpan;
         osc.warp1  = v.warp1;
         osc.warp2  = v.warp2;
+        osc.type   = v.type;
+        osc.mapped = m_note >= v.keyLo && m_note <= v.keyHi && m_velocityRaw >= v.velLo && m_velocityRaw <= v.velHi;
         if (!osc.on) continue;
+        if (osc.type != modules::OscType::Wavetable) {
+            // Sample-based sources: no unison/warps; level, pan and pitch apply.
+            panGains(v.pan, osc.genGainL, osc.genGainR);
+            osc.genOffsetSemis = v.pitchSemis + control.bendSemis;
+            osc.smpLoop = v.smpLoop;
+            osc.smpStart = v.smpStart;
+            osc.smpEnd = v.smpEnd;
+            osc.smpLoopStart = v.smpLoopStart;
+            osc.smpLoopEnd = v.smpLoopEnd;
+            osc.smpXfade = v.smpXfade;
+            osc.smpFileLoop = v.smpFileLoop;
+            auto& g = osc.grn;
+            g.position = v.grnPos;
+            g.scan = v.grnScan;
+            g.sizeMs = v.grnSize;
+            g.density = v.grnDensity;
+            g.posRandom = v.grnPosRand;
+            g.pitchRandom = v.grnPitchRand;
+            g.panRandom = v.grnPanRand;
+            g.window = v.grnWindow;
+            g.windowAmount = v.grnWindowAmt;
+            g.sampleRate = sr;
+            auto& sp = osc.spc;
+            sp.position = v.spcPos;
+            sp.scan = v.spcScan;
+            sp.timbreSemis = v.spcTimbre;
+            sp.formant = v.spcFormant;
+            sp.lowCutHz = v.spcLowCut;
+            sp.highCutHz = std::max(v.spcHighCut, v.spcLowCut);
+            sp.transients = v.spcTransients;
+            sp.sampleRate = sr;
+            continue;
+        }
 
         float sumSquares = 0.0f;
         for (int u = 0; u < osc.count; ++u) {
@@ -373,7 +425,7 @@ void Voice::layout(const VoiceControl& control) noexcept
     // Which non-audible sources the warps still need as modulators.
     bool warpNeedsSub = false, warpNeedsNoise = false;
     for (const auto& v : control.osc) {
-        if (!v.enabled) continue;
+        if (!v.enabled || v.type != modules::OscType::Wavetable) continue;
         for (auto m : {v.warp1, v.warp2}) {
             warpNeedsSub   |= dsp::warpInput(m) == dsp::WarpInput::Sub;
             warpNeedsNoise |= dsp::warpInput(m) == dsp::WarpInput::Noise;
@@ -465,6 +517,183 @@ void Voice::layout(const VoiceControl& control) noexcept
 
 // --- Audio --------------------------------------------------------------------------------------------
 
+// --- Phase 7 sources ---------------------------------------------------------------------------------------
+
+namespace {
+
+// Region setup shared by the Sample oscillator and SFZ regions.
+void setupPlayer(dsp::SamplePlayer& pl, const dsp::SampleData& s, std::int64_t start, std::int64_t end,
+                 dsp::SamplePlayer::Loop loop, std::int64_t loopStart, std::int64_t loopEnd, double xfade,
+                 double engineRate) noexcept
+{
+    const std::int64_t frames = s.frames();
+    pl.start = std::clamp<std::int64_t>(start, 0, std::max<std::int64_t>(0, frames - 1));
+    pl.end = std::clamp<std::int64_t>(end, pl.start + 1, frames);
+    pl.loop = loop;
+    pl.loopStart = std::clamp<std::int64_t>(loopStart, pl.start, pl.end - 1);
+    pl.loopEnd = std::clamp<std::int64_t>(loopEnd, pl.loopStart + 1, pl.end);
+    pl.xfade = xfade;
+    pl.rate = s.sampleRate() / engineRate;
+    pl.begin(static_cast<double>(pl.start));
+}
+
+bool regionMatches(const dsp::Multisample::Region& r, int note, int velocity, std::uint32_t rr, dsp::Multisample::Trigger trigger) noexcept
+{
+    if (r.trigger != trigger || r.sample == nullptr) return false;
+    if (note < r.loKey || note > r.hiKey || velocity < r.loVel || velocity > r.hiVel) return false;
+    if (r.seqLength > 1 && static_cast<int>(rr % static_cast<std::uint32_t>(r.seqLength)) + 1 != r.seqPosition) return false;
+    return true;
+}
+
+void setupRegion(dsp::SamplePlayer& pl, const dsp::Multisample::Region& r, int note, int velocity, double engineRate) noexcept
+{
+    const auto& s = *r.sample;
+    const std::int64_t ls = r.loopStart >= 0 ? r.loopStart : (s.loopStart() >= 0 ? s.loopStart() : 0);
+    const std::int64_t le = r.loopEnd >= 0 ? r.loopEnd : (s.loopEnd() >= 0 ? s.loopEnd() : s.frames());
+    setupPlayer(pl, s, r.offset, r.end >= 0 ? r.end : s.frames(), r.loop, ls, le, r.loopXfadeSeconds * s.sampleRate(), engineRate);
+    pl.rate *= std::exp2(((note - r.keyCenter) * r.keytrack / 100.0 + r.tuneCents / 100.0) / 12.0);
+    float gl, gr;
+    panGains(r.pan, gl, gr);
+    const float g = r.gain * r.velCurve[static_cast<std::size_t>(std::clamp(velocity, 0, 127))];
+    pl.gainL = gl * g;
+    pl.gainR = gr * g;
+}
+
+} // namespace
+
+void Voice::startGenerator(int o, const VoiceTables& tables) noexcept
+{
+    auto& osc = m_osc[static_cast<std::size_t>(o)];
+    auto& gen = (*m_gen)[static_cast<std::size_t>(o)];
+    gen.started = true;
+    gen.startedType = osc.type;
+    gen.playerCount = 0;
+    gen.assetId = 0;
+    const double sr = m_sampleRate;
+
+    switch (osc.type) {
+        case modules::OscType::Sample: {
+            const auto* s = tables.sample[static_cast<std::size_t>(o)];
+            if (s == nullptr || s->frames() < 2) return;
+            const auto frames = static_cast<double>(s->frames());
+            const bool fileLoop = osc.smpFileLoop && s->loopStart() >= 0;
+            const std::int64_t ls = fileLoop ? s->loopStart() : static_cast<std::int64_t>(osc.smpLoopStart * frames);
+            const std::int64_t le = fileLoop ? s->loopEnd() : static_cast<std::int64_t>(osc.smpLoopEnd * frames);
+            setupPlayer(gen.players[0], *s, static_cast<std::int64_t>(osc.smpStart * frames), static_cast<std::int64_t>(osc.smpEnd * frames),
+                        osc.smpLoop, ls, le, osc.smpXfade * static_cast<double>(le - ls), sr);
+            gen.region[0] = -1;
+            gen.playerCount = 1;
+            gen.assetId = s->id();
+            return;
+        }
+        case modules::OscType::Multisample: {
+            const auto* ms = tables.multi[static_cast<std::size_t>(o)];
+            if (ms == nullptr) return;
+            const std::uint32_t rr = tables.roundRobin != nullptr ? tables.roundRobin[o]++ : 0u;
+            for (std::size_t r = 0; r < ms->regions.size() && gen.playerCount < Generator::kLayers; ++r) {
+                if (!regionMatches(ms->regions[r], m_note, m_velocityRaw, rr, dsp::Multisample::Trigger::Attack)) continue;
+                setupRegion(gen.players[static_cast<std::size_t>(gen.playerCount)], ms->regions[r], m_note, m_velocityRaw, sr);
+                gen.region[static_cast<std::size_t>(gen.playerCount++)] = static_cast<int>(r);
+            }
+            gen.assetId = ms->id;
+            return;
+        }
+        case modules::OscType::Granular: {
+            const auto* s = tables.sample[static_cast<std::size_t>(o)];
+            if (s == nullptr) return;
+            const std::uint64_t seed = (m_order + 1) * 0x9E3779B97F4A7C15ull ^ static_cast<std::uint64_t>(o + 1) * 0xBF58476D1CE4E5B9ull;
+            gen.granular.start(osc.grn, seed);
+            gen.assetId = s->id();
+            return;
+        }
+        case modules::OscType::Spectral: {
+            const auto* sp = tables.spectral[static_cast<std::size_t>(o)];
+            if (sp == nullptr) return;
+            gen.spectral.start(*sp, osc.spc);
+            gen.assetId = sp->id();
+            return;
+        }
+        case modules::OscType::Wavetable:
+        case modules::OscType::Count:
+            return;
+    }
+}
+
+void Voice::startReleaseRegions(int o, const VoiceTables& tables) noexcept
+{
+    auto& gen = (*m_gen)[static_cast<std::size_t>(o)];
+    const auto* ms = tables.multi[static_cast<std::size_t>(o)];
+    if (ms == nullptr || ms->id != gen.assetId) return;
+    // Release regions replace finished players first, then fill free slots.
+    for (std::size_t r = 0; r < ms->regions.size(); ++r) {
+        if (!regionMatches(ms->regions[r], m_note, m_velocityRaw, 0u, dsp::Multisample::Trigger::Release)) continue;
+        int slot = -1;
+        for (int p = 0; p < gen.playerCount && slot < 0; ++p) if (!gen.players[static_cast<std::size_t>(p)].active) slot = p;
+        if (slot < 0 && gen.playerCount < Generator::kLayers) slot = gen.playerCount++;
+        if (slot < 0) return;
+        setupRegion(gen.players[static_cast<std::size_t>(slot)], ms->regions[r], m_note, m_velocityRaw, m_sampleRate);
+        gen.players[static_cast<std::size_t>(slot)].released = true;
+        gen.region[static_cast<std::size_t>(slot)] = static_cast<int>(r);
+    }
+}
+
+bool Voice::renderGenerator(int o, int numSamples, const VoiceTables& tables) noexcept
+{
+    auto& osc = m_osc[static_cast<std::size_t>(o)];
+    auto& gen = (*m_gen)[static_cast<std::size_t>(o)];
+    if (!gen.started || gen.startedType != osc.type) startGenerator(o, tables);
+    if (gen.assetId == 0) return false;
+    std::fill(gen.left.begin(), gen.left.begin() + numSamples, 0.0f);
+    std::fill(gen.right.begin(), gen.right.begin() + numSamples, 0.0f);
+
+    switch (osc.type) {
+        case modules::OscType::Sample: {
+            const auto* s = tables.sample[static_cast<std::size_t>(o)];
+            if (s == nullptr || s->id() != gen.assetId) return false;   // asset replaced: stay silent until the next note
+            auto& pl = gen.players[0];
+            if (!(osc.smpFileLoop && s->loopStart() >= 0)) {   // loop points are modulatable
+                const auto frames = static_cast<double>(s->frames());
+                pl.loopStart = std::clamp<std::int64_t>(static_cast<std::int64_t>(osc.smpLoopStart * frames), pl.start, pl.end - 1);
+                pl.loopEnd = std::clamp<std::int64_t>(static_cast<std::int64_t>(osc.smpLoopEnd * frames), pl.loopStart + 1, pl.end);
+                pl.xfade = osc.smpXfade * static_cast<double>(pl.loopEnd - pl.loopStart);
+            }
+            const double pitch = std::exp2((static_cast<double>(m_note - s->rootKey()) + osc.genOffsetSemis) / 12.0);
+            pl.render(*s, gen.left.data(), gen.right.data(), numSamples, pitch);
+            return true;
+        }
+        case modules::OscType::Multisample: {
+            const auto* ms = tables.multi[static_cast<std::size_t>(o)];
+            if (ms == nullptr || ms->id != gen.assetId) return false;
+            if (m_releasePending) startReleaseRegions(o, tables);
+            const double pitch = std::exp2(osc.genOffsetSemis / 12.0);
+            for (int p = 0; p < gen.playerCount; ++p) {
+                const int r = gen.region[static_cast<std::size_t>(p)];
+                if (r < 0 || r >= static_cast<int>(ms->regions.size())) continue;
+                gen.players[static_cast<std::size_t>(p)].render(*ms->regions[static_cast<std::size_t>(r)].sample, gen.left.data(), gen.right.data(), numSamples, pitch);
+            }
+            return true;
+        }
+        case modules::OscType::Granular: {
+            const auto* s = tables.sample[static_cast<std::size_t>(o)];
+            if (s == nullptr || s->id() != gen.assetId) return false;
+            osc.grn.pitch = std::exp2((static_cast<double>(m_note - s->rootKey()) + osc.genOffsetSemis) / 12.0);
+            gen.granular.render(*s, osc.grn, gen.left.data(), gen.right.data(), numSamples);
+            return true;
+        }
+        case modules::OscType::Spectral: {
+            const auto* sp = tables.spectral[static_cast<std::size_t>(o)];
+            if (sp == nullptr || sp->id() != gen.assetId || tables.fft == nullptr) return false;
+            osc.spc.pitch = std::exp2((static_cast<double>(m_note - sp->rootKey()) + osc.genOffsetSemis) / 12.0);
+            gen.spectral.render(*sp, osc.spc, *tables.fft, gen.left.data(), gen.right.data(), numSamples);
+            return true;
+        }
+        case modules::OscType::Wavetable:
+        case modules::OscType::Count:
+            break;
+    }
+    return false;
+}
+
 void Voice::render(const VoiceOutputs& out, int numSamples, const VoiceTables& tables) noexcept
 {
     if (!m_env[0].isActive()) return;
@@ -473,6 +702,17 @@ void Voice::render(const VoiceOutputs& out, int numSamples, const VoiceTables& t
     float buf[kBusCount][2][kControlBlock * kMaxOversample];
     float cutoffHz[modules::FilterModule::kCount][kControlBlock];
     bool  fastCutoff[modules::FilterModule::kCount] = {};
+
+    // Sample-based sources render their whole chunk up front (at the base rate).
+    bool genActive[kOscCount] = {}, wtActive[kOscCount] = {};
+    bool anyGen = false;
+    for (int o = 0; o < kOscCount; ++o) {
+        const auto& osc = m_osc[static_cast<std::size_t>(o)];
+        if (!osc.on || !osc.mapped) continue;
+        if (osc.type == modules::OscType::Wavetable) wtActive[o] = true;
+        else anyGen |= genActive[o] = renderGenerator(o, numSamples, tables);
+    }
+    m_releasePending = false;
 
     for (int i = 0; i < numSamples; ++i) {
         // Per base sample: smoothed per-oscillator values, plus audio-rate LFO modulation on top.
@@ -521,7 +761,7 @@ void Voice::render(const VoiceOutputs& out, int numSamples, const VoiceTables& t
         for (int o = 0; o < kOscCount; ++o) {
             const auto& osc = m_osc[static_cast<std::size_t>(o)];
             const dsp::WavetableBank* table = tables.osc[static_cast<std::size_t>(o)];
-            if (!osc.on || table == nullptr) continue;
+            if (!wtActive[o] || table == nullptr) continue;
             float frame = wt[o] * static_cast<float>(table->frameCount() - 1);
             if (!osc.smooth) frame = std::round(frame);
             frames[o] = table->resolveFrame(frame);
@@ -556,7 +796,7 @@ void Voice::render(const VoiceOutputs& out, int numSamples, const VoiceTables& t
             for (int o = 0; o < kOscCount; ++o) {
                 auto& osc = m_osc[static_cast<std::size_t>(o)];
                 const dsp::WavetableBank* table = tables.osc[static_cast<std::size_t>(o)];
-                if (!osc.on || table == nullptr) continue;
+                if (!wtActive[o] || table == nullptr) continue;
 
                 const float lastFrame = static_cast<float>(table->frameCount() - 1);
                 const float paired = m_osc[static_cast<std::size_t>(kPairedOsc[o])].last;
@@ -660,6 +900,24 @@ void Voice::render(const VoiceOutputs& out, int numSamples, const VoiceTables& t
                 }
                 osc.last = mono / static_cast<float>(osc.count);
                 send(o, oscL * level[o], oscR * level[o]);
+            }
+
+            if (anyGen) {
+                for (int o = 0; o < kOscCount; ++o) {
+                    if (!genActive[o]) continue;
+                    // Base-rate generator output, linearly interpolated across oversampled sub-steps.
+                    auto& osc = m_osc[static_cast<std::size_t>(o)];
+                    const auto& gen = (*m_gen)[static_cast<std::size_t>(o)];
+                    float gl = gen.left[static_cast<std::size_t>(i)], gr = gen.right[static_cast<std::size_t>(i)];
+                    if (os > 1) {
+                        const float t = static_cast<float>(s + 1) / static_cast<float>(os);
+                        gl = osc.prevL + (gl - osc.prevL) * t;
+                        gr = osc.prevR + (gr - osc.prevR) * t;
+                        if (s + 1 == os) { osc.prevL = gen.left[static_cast<std::size_t>(i)]; osc.prevR = gen.right[static_cast<std::size_t>(i)]; }
+                    }
+                    osc.last = 0.5f * (gl + gr);
+                    send(o, gl * level[o] * osc.genGainL, gr * level[o] * osc.genGainR);
+                }
             }
 
             for (int b = 0; b < kBusCount; ++b) {

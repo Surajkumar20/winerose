@@ -12,7 +12,7 @@
 #include <vector>
 
 using namespace winerose;
-using winerose::test::midi;
+using winerose::test::midiEvent;
 using winerose::test::Rig;
 using fx::FxType;
 using Catch::Approx;
@@ -64,7 +64,7 @@ TEST_CASE("a Main-rack effect processes the voices; type changes apply at the ne
     CHECK(rmsOf(rig.renderNote(60, 0.2), 4800) < base * 0.01);
 
     slot(rig, 0, 0).set("type", static_cast<int>(FxType::None));
-    rig.block({midi(0, 0x80, 60, 0)});
+    rig.block({midiEvent(0, 0x80, 60, 0)});
     for (int b = 0; b < 4; ++b) rig.block();
     CHECK(rmsOf(rig.renderNote(60, 0.2), 4800) == Approx(base).epsilon(1e-6));
 }
@@ -101,9 +101,9 @@ TEST_CASE("a reverb tail rings on after the note ends", "[fx][engine]")
     Rig rig;
     setFx(rig, 0, 0, FxType::Reverb, {{1, 0.6f}});   // ~2.4 s RT60
     slot(rig, 0, 0).set("mix", 0.5f);
-    rig.block({midi(0, 0x90, 60, 100)});
+    rig.block({midiEvent(0, 0x90, 60, 100)});
     for (int b = 0; b < 20; ++b) rig.block();
-    rig.block({midi(0, 0x80, 60, 0)});
+    rig.block({midiEvent(0, 0x80, 60, 0)});
     for (int b = 0; b < 10; ++b) rig.block();   // the voice is long gone (15 ms release)
     CHECK(rig.engine.activeVoiceCount() == 0);
     CHECK(rig.block() > 0.01f);
@@ -132,7 +132,7 @@ TEST_CASE("FX output does not depend on the host block size", "[fx][engine]")
         float* ch[] = {l.data(), r.data()};
         const int total = 9600;
         for (int pos = 0; pos < total; pos += blockSize) {
-            MidiEvent on = midi(0, 0x90, 57, 100);
+            MidiEvent on = midiEvent(0, 0x90, 57, 100);
             const bool first = pos == 0;
             engine.process(ch, 2, blockSize, first ? &on : nullptr, first ? 1 : 0, TransportInfo{});
             out.insert(out.end(), l.begin(), l.end());
